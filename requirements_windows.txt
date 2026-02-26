@@ -1,8 +1,8 @@
 # Python 3.9 recommended
 
 # Core
-numpy>=1.26,<2.1
-opencv-python>=4.9.0
+numpy>=1.26,<2.0
+opencv-python==4.10.0.84
 scipy>=1.10
 Pillow>=10.0
 PyYAML>=6.0
@@ -18,4 +18,9 @@ torchvision==0.17.2
 
 # TFLite fallback on Windows (tflite-runtime is usually not available on Windows)
 tensorflow-intel==2.20.0
-protobuf>=5.28,<7
+
+# Protobuf compatibility
+protobuf>=5.28,<6
+
+# Ultralytics YOLO
+ultralytics>=8.4.0,<9
