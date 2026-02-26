@@ -1,0 +1,49 @@
+# Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Distribution / Build
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+*.egg
+
+# Byte-compiled / optimized / binary files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Data and large model files
+data/
+work_dirs/
+*.pt
+*.pth
+*.jpg
+*.png
+
+# Temporary files and Logs
+cache/
+logs/
+output.txt
+tmp.*
+*.un~
+.*.swp
+
+# Operating System and IDEs
+.DS_Store
+.vscode/*
+.idea/
+.ipynb_checkpoints/
