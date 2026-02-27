@@ -25,7 +25,6 @@ DEFAULT_CHECKPOINT = 'checkpoints/tusimple_r18.pth'
 DEFAULT_SOURCE = '0'
 DEFAULT_DEVICE = 'auto'  # 'auto' | 'cuda' | 'mps' | 'cpu'
 DEFAULT_YOLO_MODEL = 'checkpoints/yolov8n_int8.tflite'
-DEFAULT_STEERING_VISUALIZE = True
 CLOSE_RATIO = 0.7  # Threshold for classifying objects as 'close' based on bounding box area ratio to frame area
 
 LANE_COLORS = [
@@ -77,7 +76,7 @@ class FrontCamera:
                             help='YOLO model path (.pt/.tflite) relative to project root or absolute')
         parser.add_argument('--output', default=None,
                             help='optional output video path (e.g. demo.mp4)')
-        parser.add_argument('--steering_visualize', default=DEFAULT_STEERING_VISUALIZE)
+        parser.add_argument('--steering-visualize', action='store_true', default=True)
         parser.add_argument('--close-ratio', type=float, default=CLOSE_RATIO)
 
         return parser.parse_args()
@@ -197,7 +196,7 @@ class FrontCamera:
         and converts it to a tensor."""
         cfg = self.cfg
         self.frame = cv2.resize(frame, (cfg.ori_img_w, cfg.ori_img_h), interpolation=cv2.INTER_LINEAR)
-        cropped = frame[cfg.cut_height:, :, :]
+        cropped = self.frame[cfg.cut_height:, :, :]
         resized = cv2.resize(cropped, (cfg.img_w, cfg.img_h), interpolation=cv2.INTER_LINEAR)
         img = resized.astype(np.float32) / 255.0
         img = np.transpose(img, (2, 0, 1))
@@ -358,7 +357,7 @@ class FrontCamera:
         for obj in self.objects:
             in_lane = self.is_within_lane(obj)
             is_close = self.is_close_to(frame_area, obj)
-            side = self.get_side(obj, frame_w)
+            side = self.get_side(obj)
             alert_obj = dict(obj)
             alert_obj['name'] = self.get_object_name(obj)  # resolve name once, reuse everywhere
             self.check_obj_stat(alert_obj, in_lane, is_close, side)
@@ -404,10 +403,10 @@ class FrontCamera:
 
         out_lines = []
         if warning_objs:
-            warning_part = ', '.join([f"{obj['name']}({self.get_side(obj)})" for obj in warning_objs])
+            warning_part = ', '.join([f"{obj['name']}({obj['side']})" for obj in warning_objs])
             out_lines.append(f"Warning: {warning_part} close")
         if danger_objs:
-            danger_part = ', '.join([f"{obj['name']}({self.get_side(obj)})" for obj in danger_objs])
+            danger_part = ', '.join([f"{obj['name']}({obj['side']})" for obj in danger_objs])
             out_lines.append(f"Danger: {danger_part} in lane")
 
         return out_lines
