@@ -188,9 +188,9 @@ class FrontCamera:
                 cleaned[k] = v
         self.model.load_state_dict(cleaned, strict=False)
 
-    """----------------------------"""
-    """Methods for video processing"""
-    """----------------------------"""
+    """-----------------------------------------------"""
+    """Methods for video processing and lane detection"""
+    """-----------------------------------------------"""
 
     def preprocess_frame(self, frame):
         """Preprocess the input frame for lane detection. Resizes and normalizes the image,
@@ -231,6 +231,10 @@ class FrontCamera:
         lanes_xy.sort(key=lambda xys: xys[0][0])
 
         self.lanes_xy = lanes_xy
+
+    """-------------------------------------------------"""
+    """For object classification based on lane positions"""
+    """-------------------------------------------------"""
 
     @staticmethod
     def interpolate_x_at_y(lane_xy, y):
@@ -281,10 +285,6 @@ class FrontCamera:
                     return True
 
         return False
-
-    """-------------------------------------------------"""
-    """For object classification based on lane positions"""
-    """-------------------------------------------------"""
 
     def get_object_name(self, obj):
         cls_id = obj['cls']
@@ -516,8 +516,6 @@ class FrontCamera:
         if self.writer is not None:
             self.writer.release()
         cv2.destroyAllWindows()
-
-
 
 def main():
     demo = FrontCamera()
