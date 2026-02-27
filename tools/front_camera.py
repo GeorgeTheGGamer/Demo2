@@ -14,7 +14,8 @@ import importlib
 
 from clrnet.models.registry import build_net
 from clrnet.utils.config import Config
-from tools.steering_helper import SteeringHelper
+from tools.helper.steering_helper import SteeringHelper
+from tools.helper.hough_lane_detect import LaneDetector
 import tools.YOLOv8n.objectDetector as oD
 
 # -----------------------------
@@ -26,6 +27,7 @@ DEFAULT_SOURCE = '0'
 DEFAULT_DEVICE = 'auto'  # 'auto' | 'cuda' | 'mps' | 'cpu'
 DEFAULT_YOLO_MODEL = 'checkpoints/yolov8n_int8.tflite'
 CLOSE_RATIO = 0.7  # Threshold for classifying objects as 'close' based on bounding box area ratio to frame area
+ACTIVE_HOUGH = True  # Whether to use Hough-based lane detection for steering angle estimation, which is more reliable on curves in real-world testing
 
 LANE_COLORS = [
         (255, 0, 0),
@@ -44,8 +46,8 @@ class FrontCamera:
     [--device DEVICE_TYPE] [--conf LANE_CONF] [--max-lanes MAX_LANES] [--line-width LINE_WIDTH]
     [--obj-conf OBJ_CONF] [--no-objects NO_OBJECT_DETECTION] [--yolo-model YOLO_MODEL_PATH]
     [--output VIDEO_OUTPUT_PATH] [--steering_visualize STEERING_VISUALIZE]
-    run_rear() is the main function that captures video frames, performs lane detection, object classification,
-    and visualizes the results on the frame.
+    run_rear() is the main function for demo execution
+    process() is the function that processes each frame, including preprocessing, lane detection, object classification, and visualization.
     """
 
     #TODO: why store two types of alert? (alert_objects vs danger_names/warning_names)
@@ -78,6 +80,7 @@ class FrontCamera:
                             help='optional output video path (e.g. demo.mp4)')
         parser.add_argument('--steering-visualize', action='store_true', default=True)
         parser.add_argument('--close-ratio', type=float, default=CLOSE_RATIO)
+        parser.add_argument('--active-hough', action='store_true', default=ACTIVE_HOUGH)
 
         return parser.parse_args()
 
@@ -126,6 +129,10 @@ class FrontCamera:
         self.danger_names = [] # Objects classified as 'danger' with their names and sides
         self.warning_names = [] # Objects classified as 'warning' with their names and sides
         self.close_ratio = self.args.close_ratio # Threshold for classifying objects as 'close' based on bounding box area ratio to frame area
+
+        # Hough-based lane detector for steering angle (more reliable on curves in real-world testing)
+        if self.args.active_hough:
+            self.hough_detector = LaneDetector(history_size=5)
 
         # For OpenCV video processing
         self.writer = None # Video writer for output if enabled
@@ -452,11 +459,18 @@ class FrontCamera:
         self.extract_lane_xy(lanes)
         self.draw_lanes()
 
-        # Calculate steering angle and visualize if needed for debugging
-        frame_shape = self.frame.shape
-        frame_h, frame_w = frame_shape[:2]
-        steer_helper = SteeringHelper(self.lanes_xy, y_min=frame_h / 3, y_max=frame_h, n_samples=20, idx1=1, idx2=10,
-                                      threshold=0.1)
+        # Use Hough-based lane detection for steering angle calculation.
+        if self.args.active_hough:
+            left_pts_h, right_pts_h = self.hough_detector.detect(detect_frame)
+            frame_shape = self.frame.shape
+            frame_h, frame_w = frame_shape[:2]
+            steer_helper = SteeringHelper([left_pts_h, right_pts_h], frame_width=frame_w, y_min=frame_h / 3, y_max=frame_h, n_samples=20, idx1=1, idx2=10,
+                                          threshold=0.1)
+        # Use CLRNet lane points for steering angle calculation if Hough is not active
+        else:
+            steer_helper = SteeringHelper(self.lanes_xy, frame_width=self.frame.shape[1], y_min=self.frame.shape[0] / 3, y_max=self.frame.shape[0], n_samples=20, idx1=1, idx2=10,
+                                        threshold=0.1)
+
         self.steer_angle = steer_helper.heading_angle
         if self.steering_visualize:
             steer_helper.visualization(self.frame)
