@@ -94,10 +94,19 @@ class Config:
         filename = osp.abspath(osp.expanduser(filename))
         check_file_exist(filename)
         if filename.endswith('.py'):
-            with tempfile.TemporaryDirectory() as temp_config_dir:
+            try:
+                # Try windows-friendly temp location first
+                temp_config_dir = osp.join(osp.dirname(filename), '.config_cache')
+                os.makedirs(temp_config_dir, exist_ok=True)
+            except Exception:
+                # Fall back to system temp
+                temp_config_dir = tempfile.gettempdir()
+            
+            try:
                 temp_config_file = tempfile.NamedTemporaryFile(
-                    dir=temp_config_dir, suffix='.py')
+                    dir=temp_config_dir, suffix='.py', delete=False)
                 temp_config_name = osp.basename(temp_config_file.name)
+                temp_config_file.close()
                 shutil.copyfile(filename,
                                 osp.join(temp_config_dir, temp_config_name))
                 temp_module_name = osp.splitext(temp_config_name)[0]
@@ -112,8 +121,18 @@ class Config:
                 }
                 # delete imported module
                 del sys.modules[temp_module_name]
-                # close temp file
-                temp_config_file.close()
+                # clean up temp file
+                try:
+                    os.remove(osp.join(temp_config_dir, temp_config_name))
+                except Exception:
+                    pass
+            finally:
+                # clean up cache dir if empty
+                try:
+                    if osp.exists(temp_config_dir) and not os.listdir(temp_config_dir):
+                        os.rmdir(temp_config_dir)
+                except Exception:
+                    pass
         elif filename.endswith(('.yml', '.yaml', '.json')):
             import mmcv
             cfg_dict = mmcv.load(filename)

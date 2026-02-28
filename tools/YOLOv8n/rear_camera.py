@@ -216,6 +216,80 @@ def feet_status(left_ankle, right_ankle, lanes_xy):
     return 'Both out', left_in, right_in
 
 
+def get_person_center(vis_frame, pose_model):
+    """
+    Extract person center from bounding box.
+    Returns center of the visible person on screen (not anatomical center).
+    Works for any view - full body, legs only, or partial visibility.
+    
+    Args:
+        vis_frame: OpenCV frame
+        pose_model: YOLO pose model
+    
+    Returns:
+        tuple: (center_x, center_y) in pixel coordinates or None if no person detected
+    """
+    results = pose_model(vis_frame, verbose=False)[0]
+    boxes = results.boxes
+    
+    if len(boxes) == 0:
+        return None
+    
+    # Find largest person (most likely the main person)
+    max_size = 0
+    best_box = None
+    for i, box in enumerate(boxes):
+        conf = float(box.conf)
+        if conf > 0.5:
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            size = x2 - x1
+            if size > max_size:
+                max_size = size
+                best_box = (x1, y1, x2, y2)
+    
+    if best_box is None:
+        return None
+    
+    # Center of visible bounding box
+    x1, y1, x2, y2 = best_box
+    center_x = (x1 + x2) / 2
+    center_y = (y1 + y2) / 2
+    
+    return (center_x, center_y)
+
+
+def draw_person_center(frame, center, label="Person Center"):
+    """
+    Draw person center circle and label on frame.
+    
+    Args:
+        frame: OpenCV frame
+        center: (x, y) tuple or None
+        label: Label text
+    
+    Returns:
+        frame: Modified frame
+    """
+    if center is None:
+        return frame
+    
+    x, y = int(center[0]), int(center[1])
+    
+    # Draw circle (blue)
+    cv2.circle(frame, (x, y), 12, (255, 0, 0), -1)
+    cv2.circle(frame, (x, y), 12, (0, 255, 255), 2)  # Yellow border
+    
+    # Draw crosshair
+    cv2.line(frame, (x - 15, y), (x + 15, y), (255, 0, 0), 2)
+    cv2.line(frame, (x, y - 15), (x, y + 15), (255, 0, 0), 2)
+    
+    # Draw label
+    cv2.putText(frame, label, (x - 40, y - 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+    
+    return frame
+
+
 def open_source(source):
     src = int(source) if source.isdigit() else source
     cap = cv2.VideoCapture(src)
@@ -303,6 +377,14 @@ def main():
             if status != last_status:
                 print(status)
             last_status = status
+            
+            # Track person center
+            person_center = get_person_center(vis_frame, pose_model)
+            if person_center is not None:
+                draw_person_center(vis_frame, person_center, "Center")
+                # Continuous output for external use
+                center_x, center_y = person_center
+                print(f'CENTER: {center_x:.1f}, {center_y:.1f}')
 
         now = time.time()
         fps_now = 1.0 / max(1e-6, now - prev)
