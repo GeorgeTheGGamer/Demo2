@@ -28,6 +28,7 @@ DEFAULT_DEVICE = 'auto'  # 'auto' | 'cuda' | 'mps' | 'cpu'
 DEFAULT_YOLO_MODEL = 'checkpoints/yolov8n_int8.tflite'
 CLOSE_RATIO = 0.7  # Threshold for classifying objects as 'close' based on bounding box area ratio to frame area
 ACTIVE_HOUGH = True  # Whether to use Hough-based lane detection for steering angle estimation, which is more reliable on curves in real-world testing
+VISUALIZATION = True # Whether to active visualization
 
 LANE_COLORS = [
         (255, 0, 0),
@@ -78,7 +79,7 @@ class FrontCamera:
                             help='YOLO model path (.pt/.tflite) relative to project root or absolute')
         parser.add_argument('--output', default=None,
                             help='optional output video path (e.g. demo.mp4)')
-        parser.add_argument('--steering-visualize', action='store_true', default=True)
+        parser.add_argument('--visualization', action='store_true', default=VISUALIZATION)
         parser.add_argument('--close-ratio', type=float, default=CLOSE_RATIO)
         parser.add_argument('--active-hough', action='store_true', default=ACTIVE_HOUGH)
 
@@ -140,7 +141,7 @@ class FrontCamera:
         self.frame = None  # Current frame to be processed and visualized
         self.source = self.args.source # Source for video input (camera index or video file path)
         self.line_width = self.args.line_width # Line width for lane visualization
-        self.steering_visualize = self.args.steering_visualize # Whether to visualize steering angle on the frame for debugging
+        self.visualization = self.args.visualization # Whether to visualize
         self.prev = time.time() # For calculating FPS
         self.last_alert_output = None # To avoid printing duplicate alerts in the console
 
@@ -446,20 +447,22 @@ class FrontCamera:
     """-----------------"""
 
     def process(self, frame):
-        # Preprocess frame and store the frame and preprocessed tensor for model input
+        """Process a single video frame: perform lane detection, object classification, and visualization."""
+        # 1. Preprocess frame and store the frame and preprocessed tensor for model input
         self.preprocess_frame(frame)
         # A copy of the original frame before drawing lanes and objects,
         # used for object detection to avoid interference from lane drawings
         detect_frame = self.frame.copy()
+
+
+        # 2. Extract lane polylines and draw on frame
         with torch.no_grad():
             output = self.model({'img': self.tensor})
             lanes = self.model.heads.get_lanes(output)[0]
-
-        # Extract lane polylines and draw on frame
         self.extract_lane_xy(lanes)
-        self.draw_lanes()
 
-        # Use Hough-based lane detection for steering angle calculation.
+        # 3. Calculate and store steering angle
+        # Use hough-based lane detection for steering angle estimation if active
         if self.args.active_hough:
             left_pts_h, right_pts_h = self.hough_detector.detect(detect_frame)
             frame_shape = self.frame.shape
@@ -470,32 +473,33 @@ class FrontCamera:
         else:
             steer_helper = SteeringHelper(self.lanes_xy, frame_width=self.frame.shape[1], y_min=self.frame.shape[0] / 3, y_max=self.frame.shape[0], n_samples=20, idx1=1, idx2=10,
                                         threshold=0.1)
-
         self.steer_angle = steer_helper.heading_angle
-        if self.steering_visualize:
-            steer_helper.visualization(self.frame)
 
-        # Perform object detection and classify objects based on lane positions
+        # 4. Perform object detection and classify objects based on lane positions
         self.alert_objects = []
         if self.object_model is not None:
             self.objects = oD.get_objects(detect_frame, self.object_model, conf_thres=self.args.obj_conf)
             self.classify_objects()
-            self.draw_objects()
-
             out_lines = self.get_outline()
 
-            # Display alerts on frame
+
+
+            # 5. Visualization part: draw lanes, objects, and alert text on the frame.
             # TODO: two alert? (2)
-            for i, line in enumerate(out_lines):
-                color = (0, 165, 255) if line.startswith('Warning') else (0, 0, 255)
-                cv2.putText(self.frame,
-                            line,
-                            (20, 80 + i * 35),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.8,
-                            color,
-                            2,
-                            cv2.LINE_AA)
+            if self.visualization:
+                steer_helper.visualization(self.frame)
+                self.draw_objects()
+                self.draw_lanes()
+                for i, line in enumerate(out_lines):
+                    color = (0, 165, 255) if line.startswith('Warning') else (0, 0, 255)
+                    cv2.putText(self.frame,
+                                line,
+                                (20, 80 + i * 35),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.8,
+                                color,
+                                2,
+                                cv2.LINE_AA)
 
             # Use last_alert_output to avoid printing duplicate alerts in the console
             alert_output = ' | '.join(out_lines) if out_lines else None
