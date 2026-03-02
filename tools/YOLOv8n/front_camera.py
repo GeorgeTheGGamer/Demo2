@@ -104,41 +104,61 @@ class FrontCamera:
 
         return parser.parse_args()
 
-    def __init__(self):
-        # Get initial configuration and model
-        self.args = self.parse_args()
-
+    def __init__(
+        self,
+        config: str = DEFAULT_CONFIG,
+        checkpoint: str = DEFAULT_CHECKPOINT,
+        source: str = DEFAULT_SOURCE,
+        device: str = DEFAULT_DEVICE,
+        conf: float = None,
+        max_lanes: int = None,
+        line_width: int = 4,
+        obj_conf: float = 0.3,
+        no_objects: bool = False,
+        yolo_model: str = DEFAULT_YOLO_MODEL,
+        output: str = None,
+        visualization: bool = VISUALIZATION,
+        close_ratio: float = CLOSE_RATIO,
+        active_hough: bool = ACTIVE_HOUGH,
+        yolo_stride: int = 2,
+        log_interval: float = LOG_INTERVAL_SECONDS,
+    ):
         # Load CLRNet configuration
-        self.cfg = Config.fromfile(self.resolve_path(self.args.config))
-        if self.args.conf is not None:
-            self.cfg.test_parameters.conf_threshold = self.args.conf
-        if self.args.max_lanes is not None:
-            self.cfg.max_lanes = self.args.max_lanes
-            self.cfg.test_parameters.nms_topk = self.args.max_lanes
+        self.cfg = Config.fromfile(self.resolve_path(config))
+        if conf is not None:
+            self.cfg.test_parameters.conf_threshold = conf
+        if max_lanes is not None:
+            self.cfg.max_lanes = max_lanes
+            self.cfg.test_parameters.nms_topk = max_lanes
 
         # Choose device for inference
-        self.device = self.choose_device()
+        self.device = self._select_device(device)
         print(f'Using device: {self.device}')
 
         # Build CLRNet model and load checkpoint
         self.model = build_net(self.cfg)
-        self.load_checkpoint(self.resolve_path(self.args.checkpoint))
+        self.load_checkpoint(self.resolve_path(checkpoint))
         self.model.to(self.device)
         self.model.eval()
 
         # Load YOLO model for object detection if not disabled
         self.object_model = None
         self.object_names = None
-        if not self.args.no_objects:
+        if not no_objects:
             try:
                 YOLO = importlib.import_module('ultralytics').YOLO
             except Exception as e:
                 raise RuntimeError(
                     'Ultralytics is required for object overlay. Install with: pip install ultralytics') from e
-            yolo_path = self.resolve_path(self.args.yolo_model)
+            yolo_path = self.resolve_path(yolo_model)
             self.object_model = YOLO(yolo_path)
             self.object_names = self.object_model.names if hasattr(self.object_model, 'names') else None
             print(f'Loaded YOLO model: {yolo_path}')
+
+        # Store runtime parameters
+        self._output = output
+        self._obj_conf = obj_conf
+        self._active_hough = active_hough
 
         # Initialize variables for processing
         self.tensor = None # Preprocessed tensor ready for model input
@@ -149,26 +169,26 @@ class FrontCamera:
         self.danger_names = [] # Objects classified as 'danger' with their names and sides
         self.warning_names = [] # Objects classified as 'warning' with their names and sides
         self.alert_objects = []  # List of objects with added alert fields for visualization
-        self.close_ratio = self.args.close_ratio # Threshold for classifying objects as 'close' based on bounding box area ratio to frame area
+        self.close_ratio = close_ratio # Threshold for classifying objects as 'close' based on bounding box area ratio to frame area
 
         # Hough-based lane detector for steering angle (more reliable on curves in real-world testing)
-        if self.args.active_hough:
+        if active_hough:
             self.hough_detector = LaneDetector(history_size=5)
 
         # For OpenCV video processing
         self.writer = None # Video writer for output if enabled
         self.cap = None # Video capture object for reading frames from source
         self.frame = None  # Current frame to be processed and visualized
-        self.source = self.args.source # Source for video input (camera index or video file path)
-        self.line_width = self.args.line_width # Line width for lane visualization
-        self.visualization = self.args.visualization # Whether to visualize
+        self.source = source # Source for video input (camera index or video file path)
+        self.line_width = line_width # Line width for lane visualization
+        self.visualization = visualization # Whether to visualize
         self.prev = time.time() # For calculating FPS
         self.fps = 0.0 # Smoothed FPS value for on-screen display
         self.last_alert_output = None # To avoid printing duplicate alerts in the console
         self.frame_idx = 0 # Current frame index for stride-based scheduling
         self.cached_objects = [] # Cached YOLO detections reused between stride steps
-        self.yolo_stride = max(1, int(self.args.yolo_stride))
-        self.log_interval = max(0.0, float(self.args.log_interval))
+        self.yolo_stride = max(1, int(yolo_stride))
+        self.log_interval = max(0.0, float(log_interval))
         self.last_log_ts = time.time()
         self.danger_since_ts = None # Start time for continuous object-in-lane danger
         self.out_of_lane_since_ts = None # Start time for continuous out-of-lane/no-lane condition
@@ -198,9 +218,8 @@ class FrontCamera:
             return root_candidate
         return cwd_candidate
 
-    def choose_device(self):
-        """Choose the appropriate torch device based on the device_flag or availability if device_flag is auto."""
-        device_flag = self.args.device
+    def _select_device(self, device_flag: str):
+        """Choose the appropriate torch device based on device_flag or availability if device_flag is 'auto'."""
         if device_flag == 'cuda':
             return torch.device('cuda')
         if device_flag == 'mps':
@@ -514,7 +533,7 @@ class FrontCamera:
 
     def open_source(self):
         """Open camera"""
-        source = self.args.source
+        source = self.source
         src = int(source) if source.isdigit() else source
         self.cap = cv2.VideoCapture(src)
         if not self.cap.isOpened():
@@ -527,9 +546,9 @@ class FrontCamera:
         if fps <= 0:
             fps = 30.0
         display_w, display_h = self.cfg.ori_img_w, self.cfg.ori_img_h
-        if self.args.output:
+        if self._output:
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            self.writer = cv2.VideoWriter(self.args.output, fourcc, fps, (display_w, display_h))
+            self.writer = cv2.VideoWriter(self._output, fourcc, fps, (display_w, display_h))
 
     """-----------------"""
     """Main Function!!!"""
@@ -566,7 +585,7 @@ class FrontCamera:
         hough_lanes = None
         frame_shape = self.frame.shape
         frame_h, frame_w = frame_shape[:2]
-        if self.args.active_hough:
+        if self._active_hough:
             hough_lanes = self.hough_detector.detect(detect_frame)
             steer_helper = SteeringHelper(hough_lanes, frame_width=frame_w, n_samples=20, threshold=10)
         # Use CLRNet lane points for steering angle calculation if Hough is not active
@@ -591,7 +610,7 @@ class FrontCamera:
         self.alert_message = AlertMessage()
         if self.object_model is not None:
             if self.frame_idx % self.yolo_stride == 0:
-                self.cached_objects = oD.get_objects(detect_frame, self.object_model, conf_thres=self.args.obj_conf)
+                self.cached_objects = oD.get_objects(detect_frame, self.object_model, conf_thres=self._obj_conf)
             self.objects = self.cached_objects
             self.classify_objects()
 
@@ -607,7 +626,7 @@ class FrontCamera:
                 steer_helper.visualization(self.frame)
                 self.draw_objects()
                 self.draw_lanes(self.lanes_xy, self.frame, self.line_width)
-                if self.args.active_hough:
+                if self._active_hough:
                     self.draw_lanes(hough_lanes, self.frame, self.line_width*2)
                 for i, line in enumerate(out_lines):
                     color = (0, 165, 255) if line.startswith('Warning') else (0, 0, 255)
@@ -659,7 +678,25 @@ class FrontCamera:
         cv2.destroyAllWindows()
 
 def main():
-    demo = FrontCamera()
+    args = FrontCamera.parse_args()
+    demo = FrontCamera(
+        config=args.config,
+        checkpoint=args.checkpoint,
+        source=args.source,
+        device=args.device,
+        conf=args.conf,
+        max_lanes=args.max_lanes,
+        line_width=args.line_width,
+        obj_conf=args.obj_conf,
+        no_objects=args.no_objects,
+        yolo_model=args.yolo_model,
+        output=args.output,
+        visualization=args.visualization,
+        close_ratio=args.close_ratio,
+        active_hough=args.active_hough,
+        yolo_stride=args.yolo_stride,
+        log_interval=args.log_interval,
+    )
     demo.run_rear()
 
 if __name__ == '__main__':
