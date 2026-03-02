@@ -27,7 +27,7 @@ DEFAULT_SOURCE = '0'
 DEFAULT_DEVICE = 'auto'  # 'auto' | 'cuda' | 'mps' | 'cpu'
 DEFAULT_YOLO_MODEL = 'checkpoints/yolov8n_int8.tflite'
 CLOSE_RATIO = 0.7  # Threshold for classifying objects as 'close' based on bounding box area ratio to frame area
-ACTIVE_HOUGH = True  # Whether to use Hough-based lane detection for steering angle estimation, which is more reliable on curves in real-world testing
+ACTIVE_HOUGH = False  # Whether to use Hough-based lane detection for steering angle estimation, which is more reliable on curves in real-world testing
 VISUALIZATION = True # Whether to active visualization
 
 LANE_COLORS = [
@@ -146,7 +146,7 @@ class FrontCamera:
         self.last_alert_output = None # To avoid printing duplicate alerts in the console
 
         # For output
-        self.steer_angle = None # Calculated steering angle based on lane detection, can be used for visualization or further processing
+        self.steer_angle = None # (Radius) Calculated steering angle based on lane detection, can be used for visualization or further processing
         self.alert_objects = []  # List of objects with added alert fields for visualization
 
     """-----------------------------------------------------------------------------------------------------"""
@@ -210,15 +210,16 @@ class FrontCamera:
         img = np.transpose(img, (2, 0, 1))
         self.tensor = torch.from_numpy(img).unsqueeze(0).to(self.device)
 
-    def draw_lanes(self):
+    @staticmethod
+    def draw_lanes(lanes, frame, line_width):
         """Draw detected lane lines on the frame using the extracted lane points in pixel coordinates."""
         colors = LANE_COLORS
 
-        for i, xy in enumerate(self.lanes_xy):
+        for i, xy in enumerate(lanes):
             color = colors[i % len(colors)]
             for j in range(1, len(xy)):
                 # Draw line on self.frame
-                cv2.line(self.frame, xy[j - 1], xy[j], color, thickness=self.line_width)
+                cv2.line(frame, xy[j - 1], xy[j], color, thickness=line_width)
 
 
     def extract_lane_xy(self, lanes):
@@ -463,17 +464,17 @@ class FrontCamera:
 
         # 3. Calculate and store steering angle
         # Use hough-based lane detection for steering angle estimation if active
+        hough_lanes = None
+        frame_shape = self.frame.shape
+        frame_h, frame_w = frame_shape[:2]
         if self.args.active_hough:
-            left_pts_h, right_pts_h = self.hough_detector.detect(detect_frame)
-            frame_shape = self.frame.shape
-            frame_h, frame_w = frame_shape[:2]
-            steer_helper = SteeringHelper([left_pts_h, right_pts_h], frame_width=frame_w, y_min=frame_h / 3, y_max=frame_h, n_samples=20, idx1=1, idx2=10,
-                                          threshold=0.1)
+            hough_lanes = self.hough_detector.detect(detect_frame)
+            steer_helper = SteeringHelper(hough_lanes, frame_width=frame_w, n_samples=20, threshold=10)
         # Use CLRNet lane points for steering angle calculation if Hough is not active
         else:
-            steer_helper = SteeringHelper(self.lanes_xy, frame_width=self.frame.shape[1], y_min=self.frame.shape[0] / 3, y_max=self.frame.shape[0], n_samples=20, idx1=1, idx2=10,
-                                        threshold=0.1)
+            steer_helper = SteeringHelper(self.lanes_xy, frame_width=frame_w, n_samples=20, threshold=10)
         self.steer_angle = steer_helper.heading_angle
+        # TODO: Throw error if angle > ~60?
 
         # 4. Perform object detection and classify objects based on lane positions
         self.alert_objects = []
@@ -482,14 +483,14 @@ class FrontCamera:
             self.classify_objects()
             out_lines = self.get_outline()
 
-
-
             # 5. Visualization part: draw lanes, objects, and alert text on the frame.
             # TODO: two alert? (2)
             if self.visualization:
                 steer_helper.visualization(self.frame)
                 self.draw_objects()
-                self.draw_lanes()
+                self.draw_lanes(self.lanes_xy, self.frame, self.line_width)
+                if self.args.active_hough:
+                    self.draw_lanes(hough_lanes, self.frame, self.line_width*2)
                 for i, line in enumerate(out_lines):
                     color = (0, 165, 255) if line.startswith('Warning') else (0, 0, 255)
                     cv2.putText(self.frame,

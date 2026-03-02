@@ -362,3 +362,4 @@ if __name__ == '__main__':
 
     cap.release()
     cv2.destroyAllWindows()
+# TODO: try one dimensional poly fit for lane lines
