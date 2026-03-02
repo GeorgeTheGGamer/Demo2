@@ -25,6 +25,10 @@ DEFAULT_CHECKPOINT = 'checkpoints/tusimple_r18.pth'
 DEFAULT_SOURCE = '0'
 DEFAULT_DEVICE = 'mps'  # 'auto' | 'cuda' | 'mps' | 'cpu'
 DEFAULT_POSE_MODEL = 'checkpoints/yolov8n-pose_int8.tflite'
+LOG_INTERVAL_SECONDS = 5.0
+FOOT_OUT_STOP_SECONDS = 3.0
+NO_FEET_STOP_SECONDS = 5.0
+REAR_OUT_OF_LANE_STOP_SECONDS = 2.0
 
 
 def parse_args():
@@ -48,6 +52,8 @@ def parse_args():
                         help='YOLO pose model path (.pt/.tflite) relative to project root or absolute')
     parser.add_argument('--output', default=None,
                         help='optional output video path (e.g. demo.mp4)')
+    parser.add_argument('--log-interval', type=float, default=LOG_INTERVAL_SECONDS,
+                        help='print status every N seconds (0 disables periodic status logs)')
     return parser.parse_args()
 
 
@@ -216,6 +222,54 @@ def feet_status(left_ankle, right_ankle, lanes_xy):
     return 'Both out', left_in, right_in
 
 
+def rear_status_explanation(status):
+    if status == 'No feet detected':
+        return 'YOLO-Pose found a person but failed to identify ankle points.'
+    if status == 'Safe':
+        return 'Both left and right ankle coordinates are between the rear lane lines.'
+    if status in ('Left out', 'Right out'):
+        return 'One specific ankle is outside the detected lane boundary.'
+    if status == 'Both out':
+        return 'Both ankles are detected but neither is within the lane lines.'
+    return 'Unknown rear status.'
+
+
+def get_rear_object_detection_output(status):
+    warning = []
+    danger = []
+    if status == 'No feet detected':
+        warning.append('person(unknown_ankles)')
+    elif status == 'Left out':
+        danger.append('left_foot(out_of_lane)')
+    elif status == 'Right out':
+        danger.append('right_foot(out_of_lane)')
+    elif status == 'Both out':
+        danger.append('left_foot(out_of_lane)')
+        danger.append('right_foot(out_of_lane)')
+
+    return {
+        'warning': warning,
+        'danger': danger,
+    }
+
+
+def get_rear_stop_conditions(status, lanes_xy, status_duration, lane_missing_duration, foot_monitor_armed):
+    stop_conditions = []
+    if foot_monitor_armed:
+        if status == 'Left out' and status_duration >= FOOT_OUT_STOP_SECONDS:
+            stop_conditions.append('Left foot out')
+        if status == 'Right out' and status_duration >= FOOT_OUT_STOP_SECONDS:
+            stop_conditions.append('Right foot out')
+        if status == 'Both out' and status_duration >= FOOT_OUT_STOP_SECONDS:
+            stop_conditions.append('Both feet out')
+        if status == 'No feet detected' and status_duration >= NO_FEET_STOP_SECONDS:
+            stop_conditions.append('No feet detected')
+    if lane_missing_duration >= REAR_OUT_OF_LANE_STOP_SECONDS:
+        stop_conditions.append('No lane Detected')
+        stop_conditions.append('Robot out of lane')
+    return stop_conditions
+
+
 def open_source(source):
     src = int(source) if source.isdigit() else source
     cap = cv2.VideoCapture(src)
@@ -265,19 +319,35 @@ def main():
         writer = cv2.VideoWriter(args.output, fourcc, fps, (display_w, display_h))
 
     last_status = None
+    frame_idx = 0
+    log_interval = max(0.0, float(args.log_interval))
+    last_log_ts = time.time()
+    status_since_ts = None
+    lane_missing_since_ts = None
+    foot_monitor_armed = False
     prev = time.time()
     while True:
         ok, frame = cap.read()
         if not ok:
             break
 
+        now = time.time()
+        frame_idx += 1
+
         vis_frame, tensor = preprocess_frame(frame, cfg, device)
-        with torch.no_grad():
+        with torch.inference_mode():
             output = model({'img': tensor})
             lanes = model.heads.get_lanes(output)[0]
 
         lanes_xy = extract_lane_xy(lanes, cfg, vis_frame.shape)
         draw_lanes(vis_frame, lanes, cfg, line_width=args.line_width)
+
+        lane_missing_now = (lanes_xy is None or len(lanes_xy) == 0)
+        if lane_missing_now:
+            if lane_missing_since_ts is None:
+                lane_missing_since_ts = now
+        else:
+            lane_missing_since_ts = None
 
         if pose_model is not None:
             left_ankle, right_ankle = pD.get_ankle(vis_frame, pose_model)
@@ -300,11 +370,33 @@ def main():
                         2,
                         cv2.LINE_AA)
 
+            detection_output = get_rear_object_detection_output(status)
+
             if status != last_status:
-                print(status)
+                status_since_ts = now
+            else:
+                if status_since_ts is None:
+                    status_since_ts = now
+
+            status_duration = 0.0 if status_since_ts is None else (now - status_since_ts)
+            lane_missing_duration = 0.0 if lane_missing_since_ts is None else (now - lane_missing_since_ts)
+            if status == 'Safe':
+                foot_monitor_armed = True
+            stop_conditions = get_rear_stop_conditions(
+                status,
+                lanes_xy,
+                status_duration,
+                lane_missing_duration,
+                foot_monitor_armed,
+            )
+
             last_status = status
 
-        now = time.time()
+            if log_interval > 0 and (now - last_log_ts) >= log_interval:
+                print(f'Object detection: {detection_output}')
+                print(f'Stopping the Robot: {stop_conditions}')
+                last_log_ts = now
+
         fps_now = 1.0 / max(1e-6, now - prev)
         prev = now
         cv2.putText(vis_frame,

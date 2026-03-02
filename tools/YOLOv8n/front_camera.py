@@ -32,6 +32,11 @@ CLOSE_RATIO = 0.7  # Threshold for classifying objects as 'close' based on bound
 ACTIVE_HOUGH = False  # Whether to use Hough-based lane detection for steering angle estimation, which is more reliable on curves in real-world testing
 VISUALIZATION = True # Whether to active visualization
 BIG_ANGLE_THRESHOLD = 70 # Threshold in degrees for classifying steering angle as unusually large, which may indicate the robot is in a difficult situation (e.g. sharp turn, off-road, etc.) and trigger a warning message
+OBJECT_IN_LANE_STOP_SECONDS = 1.0 # Continuous object-in-lane duration before stop condition
+PROLONGED_DANGER_SECONDS = 5.0 # Continuous object-in-lane duration before prolonged-time stop condition
+OUT_OF_LANE_STOP_SECONDS = 2.0 # Continuous out-of-lane/no-lane duration before stop condition
+CORNER_EXTREME_STOP_SECONDS = 3.0 # Continuous extreme-angle duration before stop condition
+LOG_INTERVAL_SECONDS = 5.0 # Periodic console output interval
 
 LANE_COLORS = [
         (255, 0, 0),
@@ -94,8 +99,8 @@ class FrontCamera:
         parser.add_argument('--active-hough', action='store_true', default=ACTIVE_HOUGH)
         parser.add_argument('--yolo-stride', type=int, default=2,
                     help='run YOLO every N frames (reuse previous detections between runs)')
-        parser.add_argument('--log-every', type=int, default=30,
-                    help='print status every N frames (0 disables periodic status logs)')
+        parser.add_argument('--log-interval', type=float, default=LOG_INTERVAL_SECONDS,
+                help='print status every N seconds (0 disables periodic status logs)')
 
         return parser.parse_args()
 
@@ -163,7 +168,13 @@ class FrontCamera:
         self.frame_idx = 0 # Current frame index for stride-based scheduling
         self.cached_objects = [] # Cached YOLO detections reused between stride steps
         self.yolo_stride = max(1, int(self.args.yolo_stride))
-        self.log_every = max(0, int(self.args.log_every))
+        self.log_interval = max(0.0, float(self.args.log_interval))
+        self.last_log_ts = time.time()
+        self.danger_since_ts = None # Start time for continuous object-in-lane danger
+        self.out_of_lane_since_ts = None # Start time for continuous out-of-lane/no-lane condition
+        self.corner_angle_extreme = False # True when raw steering angle exceeds BIG_ANGLE_THRESHOLD
+        self.extreme_angle_deg = None # Angle value when corner angle is too extreme
+        self.extreme_corner_since_ts = None # Start time for continuous extreme-angle condition
 
         # For output
         self.steer_angle = None # (Radius) Calculated steering angle based on lane detection, can be used for visualization or further processing
@@ -239,9 +250,7 @@ class FrontCamera:
         for i, xy in enumerate(lanes):
             color = colors[i % len(colors)]
             for j in range(1, len(xy)):
-                # Draw line on self.frame
                 cv2.line(frame, xy[j - 1], xy[j], color, thickness=line_width)
-
 
     def extract_lane_xy(self, lanes):
         """Extract lane points in pixel coordinates, filter out points outside the frame, and sort lanes by their starting x coordinate."""
@@ -266,7 +275,7 @@ class FrontCamera:
         """Check if the robot is out of lane if lane cannot be detected"""
         if lanes_xy is None or len(lanes_xy) == 0:
             return True
-        return True
+        return False
 
     """-------------------------------------------------"""
     """For object classification based on lane positions"""
@@ -284,7 +293,6 @@ class FrontCamera:
                 return x1 + t * (x2 - x1)
         return None
 
-
     def is_within_lane(self, obj):
         """Check if the box is within the lane"""
         lanes_xy = self.lanes_xy
@@ -298,24 +306,15 @@ class FrontCamera:
         for pt in pts:
             x, y = pt
             xs_at_y = []
-
-            # For each lane, check if the y coordinate of the point
-            # falls within the y range of the lane segments and interpolate the corresponding x coordinate
             for lane_xy in lanes_xy:
                 x_interp = self.interpolate_x_at_y(lane_xy, y)
                 if x_interp is not None:
                     xs_at_y.append(x_interp)
 
-            # If there are less than 2 interpolated x coordinates at that y level,
-            # it means the point is outside the lane boundaries at that y level, so we can skip to the next point
             if len(xs_at_y) < 2:
                 continue
 
-            # Sort the interpolated x coordinates at that y level to determine the lane boundaries
             xs_at_y.sort()
-
-            # Check if the x coordinate of the point falls between any two adjacent interpolated x coordinates at that y level,
-            # which would indicate it is within the lane boundaries
             for i in range(0, len(xs_at_y) - 1):
                 if xs_at_y[i] <= x <= xs_at_y[i + 1]:
                     return True
@@ -336,9 +335,8 @@ class FrontCamera:
         cx = (x1 + x2) / 2.0
         return 'left' if cx < frame_w / 2.0 else 'right'
 
-    def is_close_to(self, frame_area, obj) :
-        """Return True if the bounding box area ratio to the frame area exceeds the close_ratio threshold,
-         indicating the object is close to the lane."""
+    def is_close_to(self, frame_area, obj):
+        """Return True if the bounding box area ratio to the frame area exceeds the close_ratio threshold."""
         x1, y1, x2, y2 = obj['bbox']
         box_w = max(0.0, x2 - x1)
         box_h = max(0.0, y2 - y1)
@@ -346,42 +344,25 @@ class FrontCamera:
         return area_ratio >= self.close_ratio
 
     def check_obj_stat(self, alert_obj, in_lane, is_close, side):
-        """Check the status of the object (in lane or close) and classify it as 'danger' or 'warning'
-        accordingly, updating the alert_objects list and danger/warning names."""
-        # TODO: switch alert_obj to use alert_message reduce redundancy
-        # TODO: add warn for robot (audio notification)
-        # Classify as 'danger' if any bottom point is within lane
+        """Classify object alert level and append to alert list when needed."""
         if in_lane:
             alert_obj['alert_level'] = 'danger'
             self.alert_message.level = 'danger'
-            # avoid saying "Danger plane or refrigerator in lane"
-            if alert_obj['name'] == 'person':
-                alert_obj['alert_text'] = f'Danger: person in lane'  # + shout: get out of the way!
-                self.alert_message.obj_type = 'person'
-                self.alert_message.side = side
-            else:
-                alert_obj['alert_text'] = f'Danger: obstacles in lane'  # + please call for help
-                self.alert_message.obj_type = 'obstacles'
-            alert_obj['alert_color'] = (0, 0, 255)  # red
+            alert_obj['alert_text'] = f"Danger {alert_obj['name']} in lane"
+            self.alert_message.obj_type = 'person' if alert_obj['name'] == 'person' else 'obstacles'
+            alert_obj['alert_color'] = (0, 0, 255)
             alert_obj['side'] = side
             self.alert_message.side = side
             self.alert_objects.append(alert_obj)
-
-        # Otherwise 'warning' if close to lane
         elif is_close:
             alert_obj['alert_level'] = 'warning'
             self.alert_message.level = 'warning'
-            if alert_obj['name'] == 'person':
-                alert_obj['alert_text'] = f'Warning: person on your {side}'  # + shout: watch out!
-                self.alert_message.obj_type = 'person'
-            else:
-                alert_obj['alert_text'] = f'Warning: obstacles on your {side}'  # + please be careful
-                self.alert_message.obj_type = 'obstacles'
-            alert_obj['alert_color'] = (0, 165, 255)  # orange
+            alert_obj['alert_text'] = f"Warning {alert_obj['name']} close"
+            self.alert_message.obj_type = 'person' if alert_obj['name'] == 'person' else 'obstacles'
+            alert_obj['alert_color'] = (0, 165, 255)
             alert_obj['side'] = side
             self.alert_message.side = side
             self.alert_objects.append(alert_obj)
-
         else:
             self.alert_message.level = 'safe'
             self.alert_message.obj_type = 'none'
@@ -462,8 +443,70 @@ class FrontCamera:
         if danger_objs:
             danger_part = ', '.join([f"{obj['name']}({obj['side']})" for obj in danger_objs])
             out_lines.append(f"Danger: {danger_part} in lane")
-
         return out_lines
+
+    def get_object_detection_output(self):
+        """Build a compact dictionary-style object detection summary for console output."""
+        warning_objs = [obj for obj in self.alert_objects if obj.get('alert_level') == 'warning']
+        danger_objs = [obj for obj in self.alert_objects if obj.get('alert_level') == 'danger']
+
+        def summarize(objs):
+            counts = {}
+            for obj in objs:
+                key = (obj.get('name', 'unknown'), obj.get('side', 'none'))
+                counts[key] = counts.get(key, 0) + 1
+
+            parts = []
+            for (name, side), count in counts.items():
+                label = f'{name}({side})'
+                if count > 1:
+                    label = f'{label}x{count}'
+                parts.append(label)
+            return parts
+
+        warning_summary = summarize(warning_objs)
+        danger_summary = summarize(danger_objs)
+
+        return {
+            'warning': warning_summary,
+            'danger': danger_summary,
+        }
+
+    def get_stop_conditions(self, now_ts):
+        """Return stop-condition reasons for front camera logic."""
+        stop_conditions = []
+
+        if self.danger_since_ts is not None and (now_ts - self.danger_since_ts) >= OBJECT_IN_LANE_STOP_SECONDS:
+            stop_conditions.append('If object is in lane')
+        if self.danger_since_ts is not None and (now_ts - self.danger_since_ts) >= PROLONGED_DANGER_SECONDS:
+            stop_conditions.append('For prolonged time')
+        if self.out_of_lane_since_ts is not None and (now_ts - self.out_of_lane_since_ts) >= OUT_OF_LANE_STOP_SECONDS:
+            stop_conditions.append('No lane Detected')
+            stop_conditions.append('Robot out of lane')
+        if self.extreme_corner_since_ts is not None and (now_ts - self.extreme_corner_since_ts) >= CORNER_EXTREME_STOP_SECONDS:
+            stop_conditions.append('Corner Angle too extreme')
+
+        return stop_conditions
+
+    def update_front_condition_timers(self, now_ts, out_of_lane_now, angle_extreme_now, has_object_danger):
+        """Update continuous-condition timers for front stop logic."""
+        if out_of_lane_now:
+            if self.out_of_lane_since_ts is None:
+                self.out_of_lane_since_ts = now_ts
+        else:
+            self.out_of_lane_since_ts = None
+
+        if angle_extreme_now:
+            if self.extreme_corner_since_ts is None:
+                self.extreme_corner_since_ts = now_ts
+        else:
+            self.extreme_corner_since_ts = None
+
+        if has_object_danger:
+            if self.danger_since_ts is None:
+                self.danger_since_ts = now_ts
+        else:
+            self.danger_since_ts = None
 
     """-----------"""
     """For Open CV"""
@@ -515,7 +558,8 @@ class FrontCamera:
         self.extract_lane_xy(lanes)
 
         # Check if robot is out of lane based on lane points, update robot status accordingly
-        self.robot_stat = RobotStatus.OUT_OF_LANE if self.check_out_of_lane(self.lanes_xy) else RobotStatus.NORMAL
+        out_of_lane_now = self.check_out_of_lane(self.lanes_xy)
+        self.robot_stat = RobotStatus.OUT_OF_LANE if out_of_lane_now else RobotStatus.NORMAL
 
         # 3. Calculate and store steering angle
         # Use hough-based lane detection for steering angle estimation if active
@@ -530,10 +574,14 @@ class FrontCamera:
             steer_helper = SteeringHelper(self.lanes_xy, frame_width=frame_w, n_samples=20, threshold=10)
         max_angle = math.radians(45)
         angle = steer_helper.heading_angle
+        self.corner_angle_extreme = False
+        self.extreme_angle_deg = None
         # Check if angle is weirdly large, if so send danger message
-        if angle >= math.radians(BIG_ANGLE_THRESHOLD):
+        angle_extreme_now = abs(angle) >= math.radians(BIG_ANGLE_THRESHOLD)
+        if angle_extreme_now:
             self.robot_stat = RobotStatus.LARGE_ANGLE
-            print(f"Warning: Unusual steering angle detected: {math.degrees(angle):.2f} degrees")
+            self.corner_angle_extreme = True
+            self.extreme_angle_deg = math.degrees(angle)
 
         angle = max(min(angle, max_angle), -max_angle)
         self.steer_angle = angle
@@ -546,7 +594,13 @@ class FrontCamera:
                 self.cached_objects = oD.get_objects(detect_frame, self.object_model, conf_thres=self.args.obj_conf)
             self.objects = self.cached_objects
             self.classify_objects()
+
+            has_object_danger = any(obj.get('alert_level') == 'danger' for obj in self.alert_objects)
+            self.update_front_condition_timers(now, out_of_lane_now, angle_extreme_now, has_object_danger)
+
             out_lines = self.get_outline()
+            detection_output = self.get_object_detection_output()
+            stop_conditions = self.get_stop_conditions(now)
 
             # 5. Visualization part: draw lanes, objects, and alert text on the frame.
             if self.visualization:
@@ -567,16 +621,12 @@ class FrontCamera:
                                 cv2.LINE_AA)
                 self.draw_fps()
 
-            # Use last_alert_output to avoid printing duplicate alerts in the console
-            alert_output = ' | '.join(out_lines) if out_lines else None
-            if alert_output and alert_output != self.last_alert_output:
-                print(alert_output)
-                self.last_alert_output = alert_output
-
             # Periodic status output to reduce console I/O overhead
-            if self.log_every and (self.frame_idx % self.log_every == 0):
+            if self.log_interval > 0 and (now - self.last_log_ts) >= self.log_interval:
                 print(f"Robot Status: {self.robot_stat.name}, Steering Angle: {math.degrees(self.steer_angle):.2f} degrees")
-                print(f"Object detection: {self.alert_message.level}, Object type: {self.alert_message.obj_type}, Side: {self.alert_message.side}")
+                print(f"Object detection: {detection_output}")
+                print(f"Stopping the Robot: {stop_conditions}")
+                self.last_log_ts = now
         elif self.visualization:
             # Keep FPS visible even when object detection is disabled
             self.draw_fps()

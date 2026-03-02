@@ -34,6 +34,9 @@ DEFAULT_CHECKPOINT = 'checkpoints/tusimple_r18.pth'
 DEFAULT_DEVICE = 'mps'
 DEFAULT_FRONT_YOLO = 'checkpoints/yolov8n_int8.tflite'
 DEFAULT_REAR_POSE = 'checkpoints/yolov8n-pose_int8.tflite'
+DEFAULT_FRONT_CLOSE_RATIO = 0.7
+DEFAULT_FRONT_YOLO_STRIDE = 2
+DEFAULT_LOG_EVERY = 30
 
 
 def resolve_path(path):
@@ -165,19 +168,38 @@ def classify_front_objects(objects, lanes_xy, frame_shape, names=None, close_rat
 
         obj_name = get_object_name(obj, names)
         alert_obj = dict(obj)
+        side = 'left' if ((x1 + x2) / 2.0) < (w / 2.0) else 'right'
+        alert_obj['side'] = side
+        alert_obj['name'] = obj_name
 
         if in_lane:
             alert_obj['color'] = (0, 0, 255)
+            alert_obj['alert_level'] = 'danger'
             alert_obj['prefix'] = f'Danger {obj_name} in lane'
             danger_names.add(obj_name)
             alert_objects.append(alert_obj)
         elif is_close:
             alert_obj['color'] = (0, 165, 255)
+            alert_obj['alert_level'] = 'warning'
             alert_obj['prefix'] = f'Warning {obj_name} close'
             warning_names.add(obj_name)
             alert_objects.append(alert_obj)
 
     return alert_objects, sorted(warning_names), sorted(danger_names)
+
+
+def get_front_outline(alert_objects):
+    warning_objs = [obj for obj in alert_objects if obj.get('alert_level') == 'warning']
+    danger_objs = [obj for obj in alert_objects if obj.get('alert_level') == 'danger']
+
+    out_lines = []
+    if warning_objs:
+        warning_part = ', '.join([f"{obj['name']}({obj['side']})" for obj in warning_objs])
+        out_lines.append(f"Warning: {warning_part} close")
+    if danger_objs:
+        danger_part = ', '.join([f"{obj['name']}({obj['side']})" for obj in danger_objs])
+        out_lines.append(f"Danger: {danger_part} in lane")
+    return out_lines
 
 
 def draw_front_objects(frame, objects, names=None):
@@ -354,6 +376,10 @@ def main():
 
     last_front_text = None
     last_rear_status = None
+    frame_idx = 0
+    cached_front_objects = []
+    yolo_stride = max(1, int(DEFAULT_FRONT_YOLO_STRIDE))
+    log_every = max(0, int(DEFAULT_LOG_EVERY))
 
     try:
         while True:
@@ -366,23 +392,22 @@ def main():
             rear_frame = decode_packet(rear_receiver.get_latest_frame())
 
             if front_frame is not None:
+                frame_idx += 1
                 vis_front, t_front = preprocess_frame(front_frame, cfg, device)
-                with torch.no_grad():
+                with torch.inference_mode():
                     out_front = lane_model({'img': t_front})
                     lanes_front = lane_model.heads.get_lanes(out_front)[0]
 
                 lanes_xy_front = draw_lanes(vis_front, lanes_front, cfg, line_width=4)
-                objects = oD.get_objects(vis_front.copy(), front_yolo, conf_thres=0.3)
+                if frame_idx % yolo_stride == 0:
+                    cached_front_objects = oD.get_objects(vis_front.copy(), front_yolo, conf_thres=0.3)
+                objects = cached_front_objects
                 alert_objects, warning_names, danger_names = classify_front_objects(
-                    objects, lanes_xy_front, vis_front.shape, front_names, close_ratio=0.7
+                    objects, lanes_xy_front, vis_front.shape, front_names, close_ratio=DEFAULT_FRONT_CLOSE_RATIO
                 )
                 draw_front_objects(vis_front, alert_objects, front_names)
 
-                front_lines = []
-                if warning_names:
-                    front_lines.append(f"Warning {', '.join(warning_names)} close")
-                if danger_names:
-                    front_lines.append(f"Danger {', '.join(danger_names)} in lane")
+                front_lines = get_front_outline(alert_objects)
 
                 for i, line in enumerate(front_lines):
                     color = (0, 165, 255) if line.startswith('Warning') else (0, 0, 255)
@@ -394,6 +419,24 @@ def main():
                     print(front_text)
                 last_front_text = front_text
 
+                if log_every and (frame_idx % log_every == 0):
+                    if danger_names:
+                        level = 'danger'
+                    elif warning_names:
+                        level = 'warning'
+                    else:
+                        level = 'safe'
+
+                    first_alert = alert_objects[0] if alert_objects else None
+                    obj_type = 'none'
+                    side = 'none'
+                    if first_alert is not None:
+                        obj_type = 'person' if first_alert.get('name') == 'person' else 'obstacles'
+                        side = first_alert.get('side', 'none')
+
+                    print('Robot Status: NORMAL, Steering Angle: N/A')
+                    print(f'Object detection: {level}, Object type: {obj_type}, Side: {side}')
+
                 with state_lock:
                     latest_state['front'] = {'warning': warning_names, 'danger': danger_names}
 
@@ -401,7 +444,7 @@ def main():
 
             if rear_frame is not None:
                 vis_rear, t_rear = preprocess_frame(rear_frame, cfg, device)
-                with torch.no_grad():
+                with torch.inference_mode():
                     out_rear = lane_model({'img': t_rear})
                     lanes_rear = lane_model.heads.get_lanes(out_rear)[0]
 
