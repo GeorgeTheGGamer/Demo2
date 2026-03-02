@@ -3,7 +3,7 @@ lane_detector.py - Real-Time Lane Detection using OpenCV
 Based on: https://medium.com/@nirmalchathura/real-time-lane-detection-with-opencv-and-python
 Uses: Gaussian blur, HSV color filtering, Canny edge detection, ROI masking, Hough Transform
 """
-
+"""BAAAAAAAAAAAAD"""
 import cv2
 import numpy as np
 from collections import deque
