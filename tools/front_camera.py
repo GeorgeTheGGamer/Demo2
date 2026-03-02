@@ -97,15 +97,15 @@ class FrontCamera:
             self.cfg.max_lanes = self.args.max_lanes
             self.cfg.test_parameters.nms_topk = self.args.max_lanes
 
+        # Choose device for inference
+        self.device = self.choose_device()
+        print(f'Using device: {self.device}')
+
         # Build CLRNet model and load checkpoint
         self.model = build_net(self.cfg)
         self.load_checkpoint(self.resolve_path(self.args.checkpoint))
         self.model.to(self.device)
         self.model.eval()
-
-        # Choose device for inference
-        self.device = self.choose_device()
-        print(f'Using device: {self.device}')
 
         # Load YOLO model for object detection if not disabled
         self.object_model = None
