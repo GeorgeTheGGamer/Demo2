@@ -13,6 +13,7 @@ except Exception:
 # -----------------------------
 # Network + camera config
 # -----------------------------
+
 LAPTOP_IP = '172.20.10.6'  # set your laptop IP
 FRONT_PORT = 8000
 REAR_PORT = 8002

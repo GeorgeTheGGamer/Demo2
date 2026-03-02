@@ -92,6 +92,10 @@ class FrontCamera:
         parser.add_argument('--visualization', action='store_true', default=VISUALIZATION)
         parser.add_argument('--close-ratio', type=float, default=CLOSE_RATIO)
         parser.add_argument('--active-hough', action='store_true', default=ACTIVE_HOUGH)
+        parser.add_argument('--yolo-stride', type=int, default=2,
+                    help='run YOLO every N frames (reuse previous detections between runs)')
+        parser.add_argument('--log-every', type=int, default=30,
+                    help='print status every N frames (0 disables periodic status logs)')
 
         return parser.parse_args()
 
@@ -154,7 +158,12 @@ class FrontCamera:
         self.line_width = self.args.line_width # Line width for lane visualization
         self.visualization = self.args.visualization # Whether to visualize
         self.prev = time.time() # For calculating FPS
+        self.fps = 0.0 # Smoothed FPS value for on-screen display
         self.last_alert_output = None # To avoid printing duplicate alerts in the console
+        self.frame_idx = 0 # Current frame index for stride-based scheduling
+        self.cached_objects = [] # Cached YOLO detections reused between stride steps
+        self.yolo_stride = max(1, int(self.args.yolo_stride))
+        self.log_every = max(0, int(self.args.log_every))
 
         # For output
         self.steer_angle = None # (Radius) Calculated steering angle based on lane detection, can be used for visualization or further processing
@@ -373,6 +382,11 @@ class FrontCamera:
             self.alert_message.side = side
             self.alert_objects.append(alert_obj)
 
+        else:
+            self.alert_message.level = 'safe'
+            self.alert_message.obj_type = 'none'
+            self.alert_message.side = 'none'
+
     def classify_objects(self):
         """Classify detected objects as 'danger' if they are within lane boundaries,
         or 'warning' if they are close to the lane (based on bounding box area ratio
@@ -421,6 +435,18 @@ class FrontCamera:
                         2,
                         cv2.LINE_AA)
 
+    def draw_fps(self):
+        """Draw FPS counter on the top-left corner of the frame."""
+        label = f'FPS: {self.fps:.1f}'
+        cv2.putText(self.frame,
+                    label,
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA)
+
     def get_outline(self):
         """
         Generate alert outline strings for display based on the classified alert objects.
@@ -468,6 +494,13 @@ class FrontCamera:
 
     def process(self, frame):
         """Process a single video frame: perform lane detection, object classification, and visualization."""
+        now = time.time()
+        dt = max(1e-6, now - self.prev)
+        instant_fps = 1.0 / dt
+        self.fps = instant_fps if self.fps <= 0.0 else (0.9 * self.fps + 0.1 * instant_fps)
+        self.prev = now
+
+        self.frame_idx += 1
         # 1. Preprocess frame and store the frame and preprocessed tensor for model input
         self.preprocess_frame(frame)
         # A copy of the original frame before drawing lanes and objects,
@@ -476,7 +509,7 @@ class FrontCamera:
 
 
         # 2. Extract lane polylines and draw on frame
-        with torch.no_grad():
+        with torch.inference_mode():
             output = self.model({'img': self.tensor})
             lanes = self.model.heads.get_lanes(output)[0]
         self.extract_lane_xy(lanes)
@@ -507,8 +540,11 @@ class FrontCamera:
 
         # 4. Perform object detection and classify objects based on lane positions
         self.alert_objects = []
+        self.alert_message = AlertMessage()
         if self.object_model is not None:
-            self.objects = oD.get_objects(detect_frame, self.object_model, conf_thres=self.args.obj_conf)
+            if self.frame_idx % self.yolo_stride == 0:
+                self.cached_objects = oD.get_objects(detect_frame, self.object_model, conf_thres=self.args.obj_conf)
+            self.objects = self.cached_objects
             self.classify_objects()
             out_lines = self.get_outline()
 
@@ -529,6 +565,7 @@ class FrontCamera:
                                 color,
                                 2,
                                 cv2.LINE_AA)
+                self.draw_fps()
 
             # Use last_alert_output to avoid printing duplicate alerts in the console
             alert_output = ' | '.join(out_lines) if out_lines else None
@@ -536,11 +573,13 @@ class FrontCamera:
                 print(alert_output)
                 self.last_alert_output = alert_output
 
-            # test output
-            print(f"Robot Status: {self.robot_stat.name}, Steering Angle: {math.degrees(self.steer_angle):.2f} degrees")
-            if self.alert_message == 'safe':
-                print(f"Object detection: safe")
-            print(f"Object detection: {self.alert_message.level}, Object type: {self.alert_message.obj_type}, Side: {self.alert_message.side}")
+            # Periodic status output to reduce console I/O overhead
+            if self.log_every and (self.frame_idx % self.log_every == 0):
+                print(f"Robot Status: {self.robot_stat.name}, Steering Angle: {math.degrees(self.steer_angle):.2f} degrees")
+                print(f"Object detection: {self.alert_message.level}, Object type: {self.alert_message.obj_type}, Side: {self.alert_message.side}")
+        elif self.visualization:
+            # Keep FPS visible even when object detection is disabled
+            self.draw_fps()
 
     def run_rear(self):
         """Main loop for processing video frames, performing lane detection, object classification, and visualization."""
