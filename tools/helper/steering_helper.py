@@ -13,7 +13,7 @@ class SteeringHelper:
         lanes_xy   : list of N lanes, each lane is a list of (x, y) tuples, sorted left→right by x.
                      Can also be a 2-tuple (left_pts, right_pts) for backward compatibility.
         frame_width: width of the frame in pixels, used to find the lane pair closest to center.
-        The two lanes whose average-x straddles the frame centre are selected as left/right boundary.
+        The two lanes whose average-x straddles the frame center are selected as left/right boundary.
         self.worked is False when fewer than 2 valid lanes are found.
         """
         self.worked = False
@@ -25,20 +25,14 @@ class SteeringHelper:
         if not lanes_xy or len(lanes_xy) < 2:
             return
 
-        # Normalise input
-        # Accept both a plain 2-tuple and a list of N lanes
-        if len(lanes_xy) == 2 and not isinstance(lanes_xy[0][0], (list, tuple)):
-            # Old API: points_xy = (left_pts, right_pts)
-            candidates = list(lanes_xy)
-        else:
-            candidates = list(lanes_xy)
+        candidates = list(lanes_xy)
 
         # Filter out lanes with too few points
         candidates = [lane for lane in candidates if len(lane) >= MIN_POINTS]
         if len(candidates) < 2:
             return
 
-        # Pick the lane pair that straddles the frame centre
+        # Pick the lane pair that straddles the frame center
         cx = frame_width / 2.0
 
         def mean_x(lane):

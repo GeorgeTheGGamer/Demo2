@@ -46,7 +46,7 @@ class FrontCamera:
     Usage: python tools/front_camera.py [config] [--checkpoint CHECKPOINT_PATH] [--source CAMERA_ID]
     [--device DEVICE_TYPE] [--conf LANE_CONF] [--max-lanes MAX_LANES] [--line-width LINE_WIDTH]
     [--obj-conf OBJ_CONF] [--no-objects NO_OBJECT_DETECTION] [--yolo-model YOLO_MODEL_PATH]
-    [--output VIDEO_OUTPUT_PATH] [--steering_visualize STEERING_VISUALIZE]
+    [--output VIDEO_OUTPUT_PATH] [--visualization] [--close-ratio CLOSE_RATIO] [--active-hough]
     run_rear() is the main function for demo execution
     process() is the function that processes each frame, including preprocessing, lane detection, object classification, and visualization.
     """
