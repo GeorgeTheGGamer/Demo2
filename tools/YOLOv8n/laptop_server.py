@@ -1,6 +1,7 @@
 import os
 import cv2
 import time
+import math
 import torch
 import socket
 import importlib
@@ -16,6 +17,7 @@ from clrnet.models.registry import build_net
 from clrnet.utils.config import Config
 import objectDetector as oD
 import poseDetector as pD
+from tools.helper.steering_helper import SteeringHelper
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -36,7 +38,15 @@ DEFAULT_FRONT_YOLO = 'checkpoints/yolov8n_int8.tflite'
 DEFAULT_REAR_POSE = 'checkpoints/yolov8n-pose_int8.tflite'
 DEFAULT_FRONT_CLOSE_RATIO = 0.7
 DEFAULT_FRONT_YOLO_STRIDE = 2
-DEFAULT_LOG_EVERY = 30
+LOG_INTERVAL_SECONDS = 5.0
+BIG_ANGLE_THRESHOLD = 70
+OBJECT_IN_LANE_STOP_SECONDS = 1.0
+PROLONGED_DANGER_SECONDS = 5.0
+OUT_OF_LANE_STOP_SECONDS = 2.0
+CORNER_EXTREME_STOP_SECONDS = 3.0
+FOOT_OUT_STOP_SECONDS = 3.0
+NO_FEET_STOP_SECONDS = 5.0
+REAR_OUT_OF_LANE_STOP_SECONDS = 2.0
 
 
 def resolve_path(path):
@@ -202,6 +212,43 @@ def get_front_outline(alert_objects):
     return out_lines
 
 
+def summarize_alert_objects(alert_objects, level):
+    objs = [obj for obj in alert_objects if obj.get('alert_level') == level]
+    counts = {}
+    for obj in objs:
+        key = (obj.get('name', 'unknown'), obj.get('side', 'none'))
+        counts[key] = counts.get(key, 0) + 1
+
+    parts = []
+    for (name, side), count in counts.items():
+        label = f'{name}({side})'
+        if count > 1:
+            label = f'{label}x{count}'
+        parts.append(label)
+    return parts
+
+
+def get_front_object_detection_output(alert_objects):
+    return {
+        'warning': summarize_alert_objects(alert_objects, 'warning'),
+        'danger': summarize_alert_objects(alert_objects, 'danger'),
+    }
+
+
+def get_front_stop_conditions(now_ts, danger_since_ts, out_of_lane_since_ts, extreme_corner_since_ts):
+    stop_conditions = []
+    if danger_since_ts is not None and (now_ts - danger_since_ts) >= OBJECT_IN_LANE_STOP_SECONDS:
+        stop_conditions.append('If object is in lane')
+    if danger_since_ts is not None and (now_ts - danger_since_ts) >= PROLONGED_DANGER_SECONDS:
+        stop_conditions.append('For prolonged time')
+    if out_of_lane_since_ts is not None and (now_ts - out_of_lane_since_ts) >= OUT_OF_LANE_STOP_SECONDS:
+        stop_conditions.append('No lane Detected')
+        stop_conditions.append('Robot out of lane')
+    if extreme_corner_since_ts is not None and (now_ts - extreme_corner_since_ts) >= CORNER_EXTREME_STOP_SECONDS:
+        stop_conditions.append('Corner Angle too extreme')
+    return stop_conditions
+
+
 def draw_front_objects(frame, objects, names=None):
     for obj in objects:
         x1, y1, x2, y2 = [int(round(v)) for v in obj['bbox']]
@@ -233,6 +280,42 @@ def feet_status(left_ankle, right_ankle, lanes_xy):
     if left_in and (not right_in):
         return 'Right out', left_in, right_in
     return 'Both out', left_in, right_in
+
+
+def get_rear_object_detection_output(status):
+    warning = []
+    danger = []
+    if status == 'No feet detected':
+        warning.append('person(unknown_ankles)')
+    elif status == 'Left out':
+        danger.append('left_foot(out_of_lane)')
+    elif status == 'Right out':
+        danger.append('right_foot(out_of_lane)')
+    elif status == 'Both out':
+        danger.append('left_foot(out_of_lane)')
+        danger.append('right_foot(out_of_lane)')
+
+    return {
+        'warning': warning,
+        'danger': danger,
+    }
+
+
+def get_rear_stop_conditions(status, status_duration, lane_missing_duration, foot_monitor_armed):
+    stop_conditions = []
+    if foot_monitor_armed:
+        if status == 'Left out' and status_duration >= FOOT_OUT_STOP_SECONDS:
+            stop_conditions.append('Left foot out')
+        if status == 'Right out' and status_duration >= FOOT_OUT_STOP_SECONDS:
+            stop_conditions.append('Right foot out')
+        if status == 'Both out' and status_duration >= FOOT_OUT_STOP_SECONDS:
+            stop_conditions.append('Both feet out')
+        if status == 'No feet detected' and status_duration >= NO_FEET_STOP_SECONDS:
+            stop_conditions.append('No feet detected')
+    if lane_missing_duration >= REAR_OUT_OF_LANE_STOP_SECONDS:
+        stop_conditions.append('No lane Detected')
+        stop_conditions.append('Robot out of lane')
+    return stop_conditions
 
 
 def draw_foot(frame, pt, color, label):
@@ -374,12 +457,20 @@ def main():
 
     print(f'[LAPTOP] Ready on device: {device}. Waiting for START...')
 
-    last_front_text = None
     last_rear_status = None
     frame_idx = 0
     cached_front_objects = []
     yolo_stride = max(1, int(DEFAULT_FRONT_YOLO_STRIDE))
-    log_every = max(0, int(DEFAULT_LOG_EVERY))
+    front_last_log_ts = time.time()
+    rear_last_log_ts = time.time()
+
+    front_danger_since_ts = None
+    front_out_of_lane_since_ts = None
+    front_extreme_corner_since_ts = None
+
+    rear_status_since_ts = None
+    rear_lane_missing_since_ts = None
+    rear_foot_monitor_armed = False
 
     try:
         while True:
@@ -392,6 +483,7 @@ def main():
             rear_frame = decode_packet(rear_receiver.get_latest_frame())
 
             if front_frame is not None:
+                now = time.time()
                 frame_idx += 1
                 vis_front, t_front = preprocess_frame(front_frame, cfg, device)
                 with torch.inference_mode():
@@ -407,6 +499,33 @@ def main():
                 )
                 draw_front_objects(vis_front, alert_objects, front_names)
 
+                has_danger = any(obj.get('alert_level') == 'danger' for obj in alert_objects)
+                if has_danger:
+                    if front_danger_since_ts is None:
+                        front_danger_since_ts = now
+                else:
+                    front_danger_since_ts = None
+
+                front_out_of_lane_now = (lanes_xy_front is None or len(lanes_xy_front) == 0)
+                if front_out_of_lane_now:
+                    if front_out_of_lane_since_ts is None:
+                        front_out_of_lane_since_ts = now
+                else:
+                    front_out_of_lane_since_ts = None
+
+                steer_helper = SteeringHelper(lanes_xy_front, frame_width=vis_front.shape[1], n_samples=20, threshold=10)
+                raw_angle = steer_helper.heading_angle
+                angle_extreme_now = abs(raw_angle) >= math.radians(BIG_ANGLE_THRESHOLD)
+                if angle_extreme_now:
+                    if front_extreme_corner_since_ts is None:
+                        front_extreme_corner_since_ts = now
+                else:
+                    front_extreme_corner_since_ts = None
+
+                max_angle = math.radians(45)
+                steer_angle = max(min(raw_angle, max_angle), -max_angle)
+                robot_status = 'LARGE_ANGLE' if angle_extreme_now else ('OUT_OF_LANE' if front_out_of_lane_now else 'NORMAL')
+
                 front_lines = get_front_outline(alert_objects)
 
                 for i, line in enumerate(front_lines):
@@ -414,28 +533,18 @@ def main():
                     cv2.putText(vis_front, line, (20, 40 + i * 32),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2, cv2.LINE_AA)
 
-                front_text = ' | '.join(front_lines) if front_lines else None
-                if front_text and front_text != last_front_text:
-                    print(front_text)
-                last_front_text = front_text
-
-                if log_every and (frame_idx % log_every == 0):
-                    if danger_names:
-                        level = 'danger'
-                    elif warning_names:
-                        level = 'warning'
-                    else:
-                        level = 'safe'
-
-                    first_alert = alert_objects[0] if alert_objects else None
-                    obj_type = 'none'
-                    side = 'none'
-                    if first_alert is not None:
-                        obj_type = 'person' if first_alert.get('name') == 'person' else 'obstacles'
-                        side = first_alert.get('side', 'none')
-
-                    print('Robot Status: NORMAL, Steering Angle: N/A')
-                    print(f'Object detection: {level}, Object type: {obj_type}, Side: {side}')
+                if (now - front_last_log_ts) >= LOG_INTERVAL_SECONDS:
+                    front_detection_output = get_front_object_detection_output(alert_objects)
+                    front_stop_conditions = get_front_stop_conditions(
+                        now,
+                        front_danger_since_ts,
+                        front_out_of_lane_since_ts,
+                        front_extreme_corner_since_ts,
+                    )
+                    print(f'Robot Status: {robot_status}, Steering Angle: {math.degrees(steer_angle):.2f} degrees')
+                    print(f'Object detection: {front_detection_output}')
+                    print(f'Stopping the Robot: {front_stop_conditions}')
+                    front_last_log_ts = now
 
                 with state_lock:
                     latest_state['front'] = {'warning': warning_names, 'danger': danger_names}
@@ -443,12 +552,20 @@ def main():
                 cv2.imshow('Front CV', vis_front)
 
             if rear_frame is not None:
+                now = time.time()
                 vis_rear, t_rear = preprocess_frame(rear_frame, cfg, device)
                 with torch.inference_mode():
                     out_rear = lane_model({'img': t_rear})
                     lanes_rear = lane_model.heads.get_lanes(out_rear)[0]
 
                 lanes_xy_rear = draw_lanes(vis_rear, lanes_rear, cfg, line_width=4)
+                rear_lane_missing_now = (lanes_xy_rear is None or len(lanes_xy_rear) == 0)
+                if rear_lane_missing_now:
+                    if rear_lane_missing_since_ts is None:
+                        rear_lane_missing_since_ts = now
+                else:
+                    rear_lane_missing_since_ts = None
+
                 left_ankle, right_ankle = pD.get_ankle(vis_rear.copy(), rear_pose)
                 status, left_in, right_in = feet_status(left_ankle, right_ankle, lanes_xy_rear)
 
@@ -462,9 +579,29 @@ def main():
                             0.9, status_color, 2, cv2.LINE_AA)
 
                 if status != last_rear_status:
-                    print(status)
                     send_to_pi(f'REAR_STATUS:{status}', PI_STATUS_PORT)
+                    rear_status_since_ts = now
+                elif rear_status_since_ts is None:
+                    rear_status_since_ts = now
                 last_rear_status = status
+
+                if status == 'Safe':
+                    rear_foot_monitor_armed = True
+
+                status_duration = 0.0 if rear_status_since_ts is None else (now - rear_status_since_ts)
+                lane_missing_duration = 0.0 if rear_lane_missing_since_ts is None else (now - rear_lane_missing_since_ts)
+                rear_detection_output = get_rear_object_detection_output(status)
+                rear_stop_conditions = get_rear_stop_conditions(
+                    status,
+                    status_duration,
+                    lane_missing_duration,
+                    rear_foot_monitor_armed,
+                )
+
+                if (now - rear_last_log_ts) >= LOG_INTERVAL_SECONDS:
+                    print(f'Object detection: {rear_detection_output}')
+                    print(f'Stopping the Robot: {rear_stop_conditions}')
+                    rear_last_log_ts = now
 
                 with state_lock:
                     latest_state['rear'] = {'status': status}
