@@ -1,232 +1,146 @@
-<div align="center">
-  
-[![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/clrnet-cross-layer-refinement-network-for/lane-detection-on-culane)](https://paperswithcode.com/sota/lane-detection-on-culane?p=clrnet-cross-layer-refinement-network-for)
-[![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/clrnet-cross-layer-refinement-network-for/lane-detection-on-llamas)](https://paperswithcode.com/sota/lane-detection-on-llamas?p=clrnet-cross-layer-refinement-network-for)
-[![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/clrnet-cross-layer-refinement-network-for/lane-detection-on-tusimple)](https://paperswithcode.com/sota/lane-detection-on-tusimple?p=clrnet-cross-layer-refinement-network-for)
+# TrackSense (Demo2)
 
+Real-time lane, object, and rear foot safety monitoring for a mobile robot.
 
-</div>
+This project uses:
+- **Laptop server** for AI inference, local CV display, control API, and live status streaming
+- **Raspberry Pi client** for dual camera streaming + Arduino bridge
+- **Mobile app** (React Native/Expo, in a sibling folder) for START/STOP and live telemetry
 
+---
 
-<div align="center">
+## Features
 
-# CLRNet: Cross Layer Refinement Network for Lane Detection
+- Front camera lane detection + steering angle estimation
+- Front object detection overlays (lane-aware box filtering)
+- Rear camera lane + ankle/foot safety status
+- Two local OpenCV windows on laptop (front + rear)
+- App control via REST (`START` / `STOP`)
+- Live status updates via WebSocket and `/status` endpoint
+- UDP command forwarding to Pi and serial forwarding to Arduino
 
-</div>
+---
 
+## Repository Structure
 
+- `main.py` – project entry helper (if used)
+- `tools/YOLOv8n/laptop_server.py` – central AI + API + display server
+- `tools/YOLOv8n/pi_client.py` – Pi dual-stream sender + command listener
+- `tools/YOLOv8n/objectDetector.py` – object detection helper
+- `tools/YOLOv8n/poseDetector.py` – pose/ankle helper
+- `tools/helper/steering_helper.py` – steering angle utilities
+- `clrnet/` + `configs/` + `checkpoints/` – lane model code/config/weights
 
-Pytorch implementation of the paper "[CLRNet: Cross Layer Refinement Network for Lane Detection](https://arxiv.org/abs/2203.10350)" (CVPR2022 Acceptance).
+---
 
-## Introduction
-![Arch](.github/arch.png)
-- CLRNet exploits more contextual information to detect lanes while leveraging local detailed lane features to improve localization accuracy. 
-- CLRNet achieves SOTA result on CULane, Tusimple, and LLAMAS datasets.
+## Network & Ports
 
-## Installation
+Default values in code:
 
-### Prerequisites
-Only test on Ubuntu18.04 and 20.04 with:
-- Python >= 3.8 (tested with Python3.8)
-- PyTorch >= 1.6 (tested with Pytorch1.6)
-- CUDA (tested with cuda10.2)
-- Other dependencies described in `requirements.txt`
+- Laptop API host: `0.0.0.0`
+- Laptop API port: `5050`
+- Front frame UDP port: `8000`
+- Rear frame UDP port: `8002`
+- Pi command UDP port: `8001`
+- Laptop IP used by app/Pi: `192.168.8.173`
+- Pi IP targets in laptop server: `192.168.8.199`, `172.17.0.1`
 
-### Clone this repository
-Clone this code to your workspace. 
-We call this directory as `$CLRNET_ROOT`
-```Shell
-git clone https://github.com/Turoad/clrnet
-```
+If your network is different, update:
+- `tools/YOLOv8n/laptop_server.py`
+- `tools/YOLOv8n/pi_client.py`
+- app endpoints in your Expo app
 
-### Create a conda virtual environment and activate it (conda is optional)
+---
 
-```Shell
-conda create -n clrnet python=3.8 -y
-conda activate clrnet
-```
+## Requirements
 
-### Install dependencies
+Use the provided requirements file for your OS:
 
-```Shell
-# Install pytorch firstly, the cudatoolkit version should be same in your system.
+- macOS: `requirements_mac.txt`
+- Windows: `requirements_windows.txt`
 
-conda install pytorch torchvision cudatoolkit=10.1 -c pytorch
+Python 3.9+ recommended.
 
-# Or you can install via pip
-pip install torch==1.8.0 torchvision==0.9.0
+---
 
-# Install python packages
-python setup.py build develop
-```
+## Setup (Laptop)
 
-### Data preparation
+1. Create and activate a virtual environment.
+2. Install dependencies from your OS requirements file.
+3. Ensure model files exist:
+	- `checkpoints/tusimple_r18.pth`
+	- `checkpoints/yolov8n_int8.tflite`
+	- `checkpoints/yolov8n-pose_int8.tflite`
+4. Run:
 
-#### CULane
+	`python3 tools/YOLOv8n/laptop_server.py`
 
-Download [CULane](https://xingangpan.github.io/projects/CULane.html). Then extract them to `$CULANEROOT`. Create link to `data` directory.
+Expected startup includes:
+- front/rear UDP listeners
+- Flask server at `http://<laptop-ip>:5050`
+- OpenCV windows for front and rear feeds
 
-```Shell
-cd $CLRNET_ROOT
-mkdir -p data
-ln -s $CULANEROOT data/CULane
-```
+---
 
-For CULane, you should have structure like this:
-```
-$CULANEROOT/driver_xx_xxframe    # data folders x6
-$CULANEROOT/laneseg_label_w16    # lane segmentation labels
-$CULANEROOT/list                 # data lists
-```
+## Setup (Raspberry Pi)
 
+1. Connect cameras (`/dev/video0`, `/dev/video2` by default).
+2. Connect Arduino serial (`/dev/ttyACM0` by default).
+3. Ensure laptop IP in `pi_client.py` matches your laptop.
+4. Run:
 
-#### Tusimple
-Download [Tusimple](https://github.com/TuSimple/tusimple-benchmark/issues/3). Then extract them to `$TUSIMPLEROOT`. Create link to `data` directory.
+	`python3 tools/YOLOv8n/pi_client.py`
 
-```Shell
-cd $CLRNET_ROOT
-mkdir -p data
-ln -s $TUSIMPLEROOT data/tusimple
-```
+Pi waits for `START` command, then streams frames to laptop.
 
-For Tusimple, you should have structure like this:
-```
-$TUSIMPLEROOT/clips # data folders
-$TUSIMPLEROOT/lable_data_xxxx.json # label json file x4
-$TUSIMPLEROOT/test_tasks_0627.json # test tasks json file
-$TUSIMPLEROOT/test_label.json # test label json file
+---
 
-```
+## Mobile App Flow
 
-For Tusimple, the segmentation annotation is not provided, hence we need to generate segmentation from the json annotation. 
+From the Expo app:
+1. Press **START**
+2. Laptop forwards START to Pi
+3. Pi enables streaming
+4. Laptop runs CV, shows overlays in both windows, and sends telemetry to app
+5. Press **STOP** to stop robot streaming/control flow
 
-```Shell
-python tools/generate_seg_tusimple.py --root $TUSIMPLEROOT
-# this will generate seg_label directory
-```
+---
 
-#### LLAMAS
-Dowload [LLAMAS](https://unsupervised-llamas.com/llamas/). Then extract them to `$LLAMASROOT`. Create link to `data` directory.
+## Runtime Behavior Notes
 
-```Shell
-cd $CLRNET_ROOT
-mkdir -p data
-ln -s $LLAMASROOT data/llamas
-```
+- Laptop keeps local windows visible (idle + running modes)
+- Steering messages are sent as plain text: `ANGLE=<value>`
+- START/STOP are plain commands over UDP to Pi
+- App receives combined front/rear JSON state from laptop
 
-Unzip both files (`color_images.zip` and `labels.zip`) into the same directory (e.g., `data/llamas/`), which will be the dataset's root. For LLAMAS, you should have structure like this:
-```
-$LLAMASROOT/color_images/train # data folders
-$LLAMASROOT/color_images/test # data folders
-$LLAMASROOT/color_images/valid # data folders
-$LLAMASROOT/labels/train # labels folders
-$LLAMASROOT/labels/valid # labels folders
-```
+---
 
+## Troubleshooting
 
-## Getting Started
+### 1) `Port 5000 is in use`
+Current server port is `5050`. If you still see 5000 conflicts, another process/version is being run. Confirm you are launching the current `laptop_server.py`.
 
-### Training
-For training, run
-```Shell
-python main.py [configs/path_to_your_config] --gpus [gpu_num]
-```
+### 2) No feed in laptop windows
+- Verify Pi is running and receives START
+- Check `LAPTOP_IP` in `pi_client.py`
+- Ensure UDP ports `8000`/`8002` are not blocked
 
-For example, run
-```Shell
-python main.py configs/clrnet/clr_resnet18_culane.py --gpus 0
-```
+### 3) App connects but no live updates
+- Verify app uses `http://<laptop-ip>:5050`
+- Verify WebSocket URL `ws://<laptop-ip>:5050/ws/status`
+- Ensure laptop and phone are on the same network
 
-### Validation
-For testing, run
-```Shell
-python main.py [configs/path_to_your_config] --[test|validate] --load_from [path_to_your_model] --gpus [gpu_num]
-```
+### 4) Flask imports unresolved in editor
+If IDE shows unresolved import for `flask`/`flask_sock`, verify interpreter selection points to the same virtual environment used to run the project.
 
-For example, run
-```Shell
-python main.py configs/clrnet/clr_dla34_culane.py --validate --load_from culane_dla34.pth --gpus 0
-```
+### 5) Arduino not receiving commands
+- Confirm serial port (`/dev/ttyACM0`) and baud (`115200`)
+- Check user permissions for serial device
+- Look for `[PI] -> ARDUINO:` logs in Pi terminal
 
-Currently, this code can output the visualization result when testing, just add `--view`.
-We will get the visualization result in `work_dirs/xxx/xxx/visualization`.
+---
 
-### Live demo (webcam/video)
-You can run a real-time demo from webcam (or a video file):
+## Safety
 
-```Shell
-python tools/live_demo.py configs/clrnet/clr_resnet18_tusimple.py --checkpoint /path/to/model.pth --source 0
-```
+This code is for prototype/testing use. Validate all stop and steering behavior in a controlled environment before real operation.
 
-Use a video file instead of webcam:
-
-```Shell
-python tools/live_demo.py configs/clrnet/clr_resnet18_tusimple.py --checkpoint /path/to/model.pth --source /path/to/video.mp4
-```
-
-Extra options:
-- `--device auto|cuda|mps|cpu`
-- `--conf 0.45` to override confidence threshold
-- `--max-lanes 4`
-- `--output demo.mp4` to save result
-
-Note: If CUDA NMS extension is not available (e.g. macOS), the demo uses a Python fallback NMS for compatibility.
-
-
-## Results
-![F1 vs. Latency for SOTA methods on the lane detection](.github/latency_f1score.png)
-
-[assets]: https://github.com/turoad/CLRNet/releases
-
-### CULane
-
-|   Backbone  |  mF1 | F1@50  | F1@75 |
-| :---  |  :---:   |   :---:    | :---:|
-| [ResNet-18][assets]     | 55.23  |  79.58   | 62.21 |
-| [ResNet-34][assets]     | 55.14  |  79.73   | 62.11 |
-| [ResNet-101][assets]     | 55.55| 80.13   | 62.96 |
-| [DLA-34][assets]     | 55.64|  80.47   | 62.78 |
-
-
-
-### TuSimple
-|   Backbone   |      F1   | Acc |      FDR     |      FNR   |
-|    :---       |          ---:          |       ---:       |       ---:       |      ---:       |
-| [ResNet-18][assets]     |    97.89    |   96.84  |    2.28  |  1.92      | 
-| [ResNet-34][assets]       |   97.82              |    96.87          |   2.27          |    2.08      | 
-| [ResNet-101][assets]      |   97.62|   96.83  |   2.37   |  2.38  |
-
-
-
-### LLAMAS
-|   Backbone    |  <center>  valid <br><center> &nbsp; mF1 &nbsp; &nbsp;  &nbsp;F1@50 &nbsp; F1@75     | <center>  test <br> F1@50 |
-|  :---:  |    :---:    |        :---:|
-| [ResNet-18][assets] |  <center> 70.83  &nbsp; &nbsp; 96.93 &nbsp; &nbsp; 85.23 | 96.00 |
-| [DLA-34][assets]     |  <center> 71.57 &nbsp; &nbsp;  97.06  &nbsp; &nbsp; 85.43  |   96.12 |
-
-“F1@50” refers to the official metric, i.e., F1 score when IoU threshold is 0.5 between the gt and prediction. "F1@75" is the F1 score when IoU threshold is 0.75.
-
-## Citation
-
-If our paper and code are beneficial to your work, please consider citing:
-```
-@InProceedings{Zheng_2022_CVPR,
-    author    = {Zheng, Tu and Huang, Yifei and Liu, Yang and Tang, Wenjian and Yang, Zheng and Cai, Deng and He, Xiaofei},
-    title     = {CLRNet: Cross Layer Refinement Network for Lane Detection},
-    booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
-    month     = {June},
-    year      = {2022},
-    pages     = {898-907}
-}
-```
-
-## Acknowledgement
-<!--ts-->
-* [open-mmlab/mmdetection](https://github.com/open-mmlab/mmdetection)
-* [pytorch/vision](https://github.com/pytorch/vision)
-* [Turoad/lanedet](https://github.com/Turoad/lanedet)
-* [ZJULearning/resa](https://github.com/ZJULearning/resa)
-* [cfzd/Ultra-Fast-Lane-Detection](https://github.com/cfzd/Ultra-Fast-Lane-Detection)
-* [lucastabelini/LaneATT](https://github.com/lucastabelini/LaneATT)
-* [aliyun/conditional-lane-detection](https://github.com/aliyun/conditional-lane-detection)
-<!--te-->
