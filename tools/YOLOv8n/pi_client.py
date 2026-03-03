@@ -3,22 +3,20 @@ import time
 import socket
 import threading
 import importlib
+import json
 
 try:
     serial = importlib.import_module('serial')
 except Exception:
     serial = None
 
-
 # -----------------------------
-# Network + camera config
+# Network + Camera Config
 # -----------------------------
-
-LAPTOP_IP = '172.20.10.6'  # set your laptop IP
+LAPTOP_IP = '192.168.8.173'  # your laptop IP
 FRONT_PORT = 8000
 REAR_PORT = 8002
 CMD_PORT = 8001
-STATUS_PORT = 8003
 MAX_DGRAM = 65507
 
 FRONT_CAMERA_DEVICE = '/dev/video0'
@@ -80,11 +78,9 @@ class PiBridge:
         self.tx_front = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.tx_rear = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
+        # Unified Command and Status Listener
         self.cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.cmd_sock.bind(('0.0.0.0', CMD_PORT))
-
-        self.status_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.status_sock.bind(('0.0.0.0', STATUS_PORT))
 
         self.arduino = self._connect_arduino()
 
@@ -143,43 +139,51 @@ class PiBridge:
                 if ok_r and len(buf_r) <= MAX_DGRAM:
                     self.tx_rear.sendto(buf_r, (LAPTOP_IP, REAR_PORT))
 
-    def _command_listener(self):
-        print(f'[PI] 🎧 Listening commands on {CMD_PORT}')
+    def _unified_listener(self):
+        print(f'[PI] 🎧 Listening for System Commands and CV Control on port {CMD_PORT}')
         while self.running:
-            data, _ = self.cmd_sock.recvfrom(1024)
-            msg = data.decode('utf-8', errors='ignore').strip()
-            if not msg:
-                continue
+            try:
+                # Need a larger buffer (4096) because JSON CV_CONTROL payloads are much bigger than simple "START" text
+                data, _ = self.cmd_sock.recvfrom(4096)
+                msg = data.decode('utf-8', errors='ignore').strip()
+                if not msg:
+                    continue
 
-            print(f'[PI] CMD <- {msg}')
-            cmd = msg.upper()
-            if cmd == 'START':
-                self._set_streaming(True)
-                self._write_arduino('START')
-            elif cmd == 'STOP':
-                self._set_streaming(False)
-                self._write_arduino('STOP')
-            else:
-                self._write_arduino(msg)
+                # 1. Traffic Director: Is it an Autonomy JSON Payload?
+                if msg.startswith("CV_CONTROL:"):
+                    json_string = msg.replace("CV_CONTROL:", "")
+                    try:
+                        control_data = json.loads(json_string)
+                        # Extract the steering angle and forward it to Arduino
+                        if 'front' in control_data and 'steering_deg' in control_data['front']:
+                            steer = control_data['front']['steering_deg']
+                            self._write_arduino(f"STEER:{steer}")
+                    except json.JSONDecodeError:
+                        print(f"[PI] ⚠️ Failed to parse CV_CONTROL JSON: {json_string}")
 
-    def _status_listener(self):
-        print(f'[PI] 🎧 Listening CV status on {STATUS_PORT}')
-        while self.running:
-            data, _ = self.status_sock.recvfrom(1024)
-            msg = data.decode('utf-8', errors='ignore').strip()
-            if not msg:
-                continue
-            print(f'[PI] STATUS <- {msg}')
-            self._write_arduino(msg)
+                # 2. Traffic Director: Is it a System Command?
+                else:
+                    print(f'[PI] CMD <- {msg}')
+                    cmd = msg.upper()
+                    if cmd == 'START':
+                        self._set_streaming(True)
+                        self._write_arduino('START')
+                    elif cmd == 'STOP':
+                        self._set_streaming(False)
+                        self._write_arduino('STOP')
+                    else:
+                        self._write_arduino(msg)
+                        
+            except Exception as e:
+                print(f"[PI] Listener Error: {e}")
 
     def run(self):
         t_stream = threading.Thread(target=self._stream_loop, daemon=True)
-        t_cmd = threading.Thread(target=self._command_listener, daemon=True)
-        t_status = threading.Thread(target=self._status_listener, daemon=True)
+        # Replaced separate cmd and status threads with one unified thread
+        t_listener = threading.Thread(target=self._unified_listener, daemon=True)
 
         t_stream.start()
-        t_cmd.start()
-        t_status.start()
+        t_listener.start()
 
         print('[PI] Ready. Waiting for START from laptop/app...')
         try:
@@ -191,15 +195,8 @@ class PiBridge:
         finally:
             try:
                 self.front_cam.stop()
-            except Exception:
-                pass
-            try:
                 self.rear_cam.stop()
-            except Exception:
-                pass
-            try:
                 self.cmd_sock.close()
-                self.status_sock.close()
                 self.tx_front.close()
                 self.tx_rear.close()
             except Exception:

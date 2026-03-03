@@ -1,4 +1,5 @@
 import os
+import json
 import cv2
 import time
 import math
@@ -7,92 +8,100 @@ import socket
 import importlib
 import threading
 import numpy as np
+from flask import Flask, request, jsonify
+from flask_sock import Sock
 
-_flask = importlib.import_module('flask')
-Flask = _flask.Flask
-request = _flask.request
-jsonify = _flask.jsonify
-
+# --- AI & AUTONOMY IMPORTS ---
 from clrnet.models.registry import build_net
 from clrnet.utils.config import Config
 import objectDetector as oD
 import poseDetector as pD
 from tools.helper.steering_helper import SteeringHelper
 
-
+# --- CONFIGURATION ---
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-
-HOST_IP = '0.0.0.0'
+HOST_IP = "0.0.0.0"
 FRONT_PORT = 8000
 REAR_PORT = 8002
 MAX_DGRAM = 65507
 
-PI_IP = ''  # set your Pi IP
+PI_IPS = ["192.168.8.199", "172.17.0.1"]
 PI_CMD_PORT = 8001
-PI_STATUS_PORT = 8003
 
 DEFAULT_CONFIG = 'configs/clrnet/clr_resnet18_tusimple.py'
 DEFAULT_CHECKPOINT = 'checkpoints/tusimple_r18.pth'
-DEFAULT_DEVICE = 'mps'
+DEFAULT_DEVICE = 'mps' # Change to 'cuda' or 'cpu' as needed
 DEFAULT_FRONT_YOLO = 'checkpoints/yolov8n_int8.tflite'
 DEFAULT_REAR_POSE = 'checkpoints/yolov8n-pose_int8.tflite'
-DEFAULT_FRONT_CLOSE_RATIO = 0.7
-DEFAULT_FRONT_YOLO_STRIDE = 2
-LOG_INTERVAL_SECONDS = 5.0
-BIG_ANGLE_THRESHOLD = 70
-OBJECT_IN_LANE_STOP_SECONDS = 1.0
-PROLONGED_DANGER_SECONDS = 5.0
-OUT_OF_LANE_STOP_SECONDS = 2.0
-CORNER_EXTREME_STOP_SECONDS = 3.0
-FOOT_OUT_STOP_SECONDS = 3.0
-NO_FEET_STOP_SECONDS = 5.0
-REAR_OUT_OF_LANE_STOP_SECONDS = 2.0
 
+# --- GLOBALS ---
+latest_rear_frame = None
+latest_front_frame = None
+is_running = False
 
+tx_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+app = Flask(__name__)
+sock = Sock(app)
+
+state_lock = threading.Lock()
+ws_lock = threading.Lock()
+ws_clients = set()
+last_ws_push_ts = 0.0
+WS_PUSH_HZ = 5.0
+
+latest_state = {
+    'running': False,
+    'front': {
+        'robot_status': 'NORMAL',
+        'object_detection': {'warning': [], 'danger': []},
+    },
+    'rear': {
+        'status': 'No feet detected',
+        'object_detection': {'warning': [], 'danger': []},
+    },
+}
+
+# --- HELPER FUNCTIONS ---
 def resolve_path(path):
-    if os.path.isabs(path):
-        return path
+    if os.path.isabs(path): return path
     cwd_candidate = os.path.abspath(path)
-    if os.path.exists(cwd_candidate):
-        return cwd_candidate
+    if os.path.exists(cwd_candidate): return cwd_candidate
     root_candidate = os.path.join(PROJECT_ROOT, path)
-    if os.path.exists(root_candidate):
-        return root_candidate
+    if os.path.exists(root_candidate): return root_candidate
     return cwd_candidate
 
-
 def choose_device(device_flag):
-    if device_flag == 'cuda':
-        return torch.device('cuda')
-    if device_flag == 'mps':
-        return torch.device('mps')
-    if device_flag == 'cpu':
-        return torch.device('cpu')
-
-    if torch.cuda.is_available():
-        return torch.device('cuda')
-    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        return torch.device('mps')
+    if device_flag == 'cuda' or torch.cuda.is_available(): return torch.device('cuda')
+    if device_flag == 'mps' or (hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()): return torch.device('mps')
     return torch.device('cpu')
-
 
 def load_checkpoint(model, checkpoint_path, device):
     ckpt = torch.load(checkpoint_path, map_location=device)
     state = ckpt['net'] if isinstance(ckpt, dict) and 'net' in ckpt else ckpt
-    cleaned = {}
-    for k, v in state.items():
-        cleaned[k[len('module.'):]] = v if k.startswith('module.') else v
+    cleaned = {k[len('module.'):] if k.startswith('module.') else k: v for k, v in state.items()}
     model.load_state_dict(cleaned, strict=False)
-
 
 def preprocess_frame(frame, cfg, device):
     frame = cv2.resize(frame, (cfg.ori_img_w, cfg.ori_img_h), interpolation=cv2.INTER_LINEAR)
     cropped = frame[cfg.cut_height:, :, :]
     resized = cv2.resize(cropped, (cfg.img_w, cfg.img_h), interpolation=cv2.INTER_LINEAR)
-    img = resized.astype(np.float32) / 255.0
-    img = np.transpose(img, (2, 0, 1))
+    img = np.transpose(resized.astype(np.float32) / 255.0, (2, 0, 1))
     tensor = torch.from_numpy(img).unsqueeze(0).to(device)
     return frame, tensor
+
+def draw_lanes(frame, lanes, cfg, line_width=4):
+    lanes_xy = []
+    h, w = frame.shape[:2]
+    colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
+    for i, lane in enumerate(lanes):
+        pts = lane.to_array(cfg)
+        xy = [(int(round(p[0])), int(round(p[1]))) for p in pts if 0 <= p[0] < w and 0 <= p[1] < h]
+        if len(xy) >= 2:
+            lanes_xy.append(xy)
+            color = colors[i % len(colors)]
+            for j in range(1, len(xy)):
+                cv2.line(frame, xy[j - 1], xy[j], color, thickness=line_width)
+    return lanes_xy
 
 
 def interpolate_x_at_y(polyline, y):
@@ -124,142 +133,6 @@ def is_point_in_lane(pt, lanes_xy):
     return False
 
 
-def extract_lane_xy(lanes, cfg, frame_shape):
-    lanes_xy = []
-    h, w = frame_shape[:2]
-    for lane in lanes:
-        pts = lane.to_array(cfg)
-        xy = []
-        for p in pts:
-            x, y = int(round(p[0])), int(round(p[1]))
-            if 0 <= x < w and 0 <= y < h:
-                xy.append((x, y))
-        if len(xy) >= 2:
-            lanes_xy.append(xy)
-    lanes_xy.sort(key=lambda xys: xys[0][0])
-    return lanes_xy
-
-
-def draw_lanes(frame, lanes, cfg, line_width=4):
-    colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
-    lanes_xy = extract_lane_xy(lanes, cfg, frame.shape)
-    for i, xy in enumerate(lanes_xy):
-        color = colors[i % len(colors)]
-        for j in range(1, len(xy)):
-            cv2.line(frame, xy[j - 1], xy[j], color, thickness=line_width)
-    return lanes_xy
-
-
-def get_object_name(obj, names=None):
-    cls_id = obj['cls']
-    if names is not None and cls_id in names:
-        return names[cls_id]
-    return str(cls_id)
-
-
-def classify_front_objects(objects, lanes_xy, frame_shape, names=None, close_ratio=0.7):
-    alert_objects = []
-    warning_names = set()
-    danger_names = set()
-    h, w = frame_shape[:2]
-    frame_area = max(1.0, float(h * w))
-
-    for obj in objects:
-        x1, y1, x2, y2 = obj['bbox']
-        in_lane = (
-            is_point_in_lane((x1, y2), lanes_xy)
-            or is_point_in_lane(((x1 + x2) / 2.0, y2), lanes_xy)
-            or is_point_in_lane((x2, y2), lanes_xy)
-        )
-
-        box_w = max(0.0, x2 - x1)
-        box_h = max(0.0, y2 - y1)
-        is_close = ((box_w * box_h) / frame_area) >= close_ratio
-
-        obj_name = get_object_name(obj, names)
-        alert_obj = dict(obj)
-        side = 'left' if ((x1 + x2) / 2.0) < (w / 2.0) else 'right'
-        alert_obj['side'] = side
-        alert_obj['name'] = obj_name
-
-        if in_lane:
-            alert_obj['color'] = (0, 0, 255)
-            alert_obj['alert_level'] = 'danger'
-            alert_obj['prefix'] = f'Danger {obj_name} in lane'
-            danger_names.add(obj_name)
-            alert_objects.append(alert_obj)
-        elif is_close:
-            alert_obj['color'] = (0, 165, 255)
-            alert_obj['alert_level'] = 'warning'
-            alert_obj['prefix'] = f'Warning {obj_name} close'
-            warning_names.add(obj_name)
-            alert_objects.append(alert_obj)
-
-    return alert_objects, sorted(warning_names), sorted(danger_names)
-
-
-def get_front_outline(alert_objects):
-    warning_objs = [obj for obj in alert_objects if obj.get('alert_level') == 'warning']
-    danger_objs = [obj for obj in alert_objects if obj.get('alert_level') == 'danger']
-
-    out_lines = []
-    if warning_objs:
-        warning_part = ', '.join([f"{obj['name']}({obj['side']})" for obj in warning_objs])
-        out_lines.append(f"Warning: {warning_part} close")
-    if danger_objs:
-        danger_part = ', '.join([f"{obj['name']}({obj['side']})" for obj in danger_objs])
-        out_lines.append(f"Danger: {danger_part} in lane")
-    return out_lines
-
-
-def summarize_alert_objects(alert_objects, level):
-    objs = [obj for obj in alert_objects if obj.get('alert_level') == level]
-    counts = {}
-    for obj in objs:
-        key = (obj.get('name', 'unknown'), obj.get('side', 'none'))
-        counts[key] = counts.get(key, 0) + 1
-
-    parts = []
-    for (name, side), count in counts.items():
-        label = f'{name}({side})'
-        if count > 1:
-            label = f'{label}x{count}'
-        parts.append(label)
-    return parts
-
-
-def get_front_object_detection_output(alert_objects):
-    return {
-        'warning': summarize_alert_objects(alert_objects, 'warning'),
-        'danger': summarize_alert_objects(alert_objects, 'danger'),
-    }
-
-
-def get_front_stop_conditions(now_ts, danger_since_ts, out_of_lane_since_ts, extreme_corner_since_ts):
-    stop_conditions = []
-    if danger_since_ts is not None and (now_ts - danger_since_ts) >= OBJECT_IN_LANE_STOP_SECONDS:
-        stop_conditions.append('If object is in lane')
-    if danger_since_ts is not None and (now_ts - danger_since_ts) >= PROLONGED_DANGER_SECONDS:
-        stop_conditions.append('For prolonged time')
-    if out_of_lane_since_ts is not None and (now_ts - out_of_lane_since_ts) >= OUT_OF_LANE_STOP_SECONDS:
-        stop_conditions.append('No lane Detected')
-        stop_conditions.append('Robot out of lane')
-    if extreme_corner_since_ts is not None and (now_ts - extreme_corner_since_ts) >= CORNER_EXTREME_STOP_SECONDS:
-        stop_conditions.append('Corner Angle too extreme')
-    return stop_conditions
-
-
-def draw_front_objects(frame, objects, names=None):
-    for obj in objects:
-        x1, y1, x2, y2 = [int(round(v)) for v in obj['bbox']]
-        name = get_object_name(obj, names)
-        label = f"{obj.get('prefix', name)} | {name} {obj['conf']:.2f}"
-        color = obj.get('color', (0, 165, 255))
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(frame, label, (x1, max(20, y1 - 8)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
-
-
 def normalize_point(pt):
     if pt is None:
         return None
@@ -282,7 +155,38 @@ def feet_status(left_ankle, right_ankle, lanes_xy):
     return 'Both out', left_in, right_in
 
 
-def get_rear_object_detection_output(status):
+def build_front_detection(objects, lanes_xy, frame_shape, names=None, close_ratio=0.7):
+    warning = []
+    danger = []
+    h, w = frame_shape[:2]
+    frame_area = max(1.0, float(h * w))
+
+    for obj in objects:
+        x1, y1, x2, y2 = obj['bbox']
+        in_lane = (
+            is_point_in_lane((x1, y2), lanes_xy)
+            or is_point_in_lane(((x1 + x2) / 2.0, y2), lanes_xy)
+            or is_point_in_lane((x2, y2), lanes_xy)
+        )
+        box_w = max(0.0, x2 - x1)
+        box_h = max(0.0, y2 - y1)
+        is_close = ((box_w * box_h) / frame_area) >= close_ratio
+
+        cls_id = obj['cls']
+        raw_name = names[cls_id] if (names is not None and cls_id in names) else str(cls_id)
+        name = 'person' if raw_name == 'person' else 'object'
+        side = 'left' if ((x1 + x2) / 2.0) < (w / 2.0) else 'right'
+        label = f'{name}({side})'
+
+        if in_lane:
+            danger.append(label)
+        elif is_close:
+            warning.append(label)
+
+    return {'warning': warning, 'danger': danger}
+
+
+def build_rear_detection(status):
     warning = []
     danger = []
     if status == 'No feet detected':
@@ -294,154 +198,126 @@ def get_rear_object_detection_output(status):
     elif status == 'Both out':
         danger.append('left_foot(out_of_lane)')
         danger.append('right_foot(out_of_lane)')
+    return {'warning': warning, 'danger': danger}
 
+
+def build_status_payload():
     return {
-        'warning': warning,
-        'danger': danger,
+        'running': latest_state.get('running', False),
+        'front': {
+            'robot_status': latest_state.get('front', {}).get('robot_status', 'NORMAL'),
+            'object_detection': latest_state.get('front', {}).get('object_detection', {'warning': [], 'danger': []}),
+        },
+        'rear': {
+            'status': latest_state.get('rear', {}).get('status', 'No feet detected'),
+            'object_detection': latest_state.get('rear', {}).get('object_detection', {'warning': [], 'danger': []}),
+        },
     }
 
 
-def get_rear_stop_conditions(status, status_duration, lane_missing_duration, foot_monitor_armed):
-    stop_conditions = []
-    if foot_monitor_armed:
-        if status == 'Left out' and status_duration >= FOOT_OUT_STOP_SECONDS:
-            stop_conditions.append('Left foot out')
-        if status == 'Right out' and status_duration >= FOOT_OUT_STOP_SECONDS:
-            stop_conditions.append('Right foot out')
-        if status == 'Both out' and status_duration >= FOOT_OUT_STOP_SECONDS:
-            stop_conditions.append('Both feet out')
-        if status == 'No feet detected' and status_duration >= NO_FEET_STOP_SECONDS:
-            stop_conditions.append('No feet detected')
-    if lane_missing_duration >= REAR_OUT_OF_LANE_STOP_SECONDS:
-        stop_conditions.append('No lane Detected')
-        stop_conditions.append('Robot out of lane')
-    return stop_conditions
+def broadcast_status(force=False):
+    global last_ws_push_ts
+    with state_lock:
+        payload = build_status_payload()
 
-
-def draw_foot(frame, pt, color, label):
-    if pt is None:
+    if (not force) and (not payload.get('running', False)):
         return
-    x, y = int(round(pt[0])), int(round(pt[1]))
-    cv2.circle(frame, (x, y), 7, (255, 255, 255), -1)
-    cv2.circle(frame, (x, y), 4, color, -1)
-    cv2.putText(frame, label, (x + 8, y - 8), cv2.FONT_HERSHEY_SIMPLEX,
-                0.5, color, 2, cv2.LINE_AA)
 
+    now = time.time()
+    if (not force) and ((now - last_ws_push_ts) < (1.0 / WS_PUSH_HZ)):
+        return
+    last_ws_push_ts = now
 
-class UDPReceiver:
-    def __init__(self, ip, port):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.bind((ip, port))
-        self.sock.settimeout(0.2)
-        self.data = None
-        self.lock = threading.Lock()
-        self.stopped = False
-
-    def start(self):
-        threading.Thread(target=self.update, daemon=True).start()
-        return self
-
-    def update(self):
-        while not self.stopped:
+    serialized = json.dumps(payload)
+    dead = []
+    with ws_lock:
+        for ws in ws_clients:
             try:
-                packet, _ = self.sock.recvfrom(MAX_DGRAM)
-                with self.lock:
-                    self.data = packet
-            except socket.timeout:
-                continue
+                ws.send(serialized)
             except Exception:
-                if not self.stopped:
-                    self.stopped = True
+                dead.append(ws)
+        for ws in dead:
+            ws_clients.discard(ws)
 
-    def get_latest_frame(self):
-        with self.lock:
-            return self.data
-
-    def stop(self):
-        self.stopped = True
-        try:
-            self.sock.close()
-        except Exception:
-            pass
-
-
-app = Flask(__name__)
-tx_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-is_running = False
-front_receiver = None
-rear_receiver = None
-
-state_lock = threading.Lock()
-latest_state = {
-    'running': False,
-    'front': {'warning': [], 'danger': []},
-    'rear': {'status': 'No feet detected'}
-}
-
-
-def send_to_pi(message, port):
-    if not PI_IP:
-        return
-    try:
-        tx_socket.sendto(message.encode('utf-8'), (PI_IP, port))
-    except Exception:
-        pass
-
-
+# --- NETWORKING THREADS ---
 @app.route('/command', methods=['POST'])
 def receive_command():
-    global is_running, front_receiver, rear_receiver
-
+    global is_running
     command = (request.json or {}).get('action', '').strip().upper()
-    if command not in ('START', 'STOP'):
-        return jsonify({'status': 'error', 'message': 'action must be START or STOP'}), 400
-
-    send_to_pi(command, PI_CMD_PORT)
-
-    if command == 'START' and not is_running:
-        is_running = True
-        front_receiver = UDPReceiver(HOST_IP, FRONT_PORT).start()
-        rear_receiver = UDPReceiver(HOST_IP, REAR_PORT).start()
-    elif command == 'STOP' and is_running:
-        is_running = False
-        if front_receiver:
-            front_receiver.stop()
-            front_receiver = None
-        if rear_receiver:
-            rear_receiver.stop()
-            rear_receiver = None
-
-    with state_lock:
-        latest_state['running'] = is_running
-
-    return jsonify({'status': 'success', 'running': is_running}), 200
+    
+    if command in ["START", "STOP"]:
+        is_running = (command == "START")
+        print(f"📱 APP SAYS {command}: Forwarding to Pi...")
+        for pi_ip in PI_IPS:
+            tx_socket.sendto(f"{command}\n".encode('utf-8'), (pi_ip, PI_CMD_PORT))
+        with state_lock:
+            latest_state['running'] = is_running
+        broadcast_status(force=True)
+        return jsonify({"status": "success", "running": is_running}), 200
+    return jsonify({'status': 'error'}), 400
 
 
 @app.route('/status', methods=['GET'])
 def get_status():
     with state_lock:
-        return jsonify(latest_state), 200
+        return jsonify(build_status_payload()), 200
 
 
-def run_flask_server():
+@sock.route('/ws/status')
+def ws_status(ws):
+    with ws_lock:
+        ws_clients.add(ws)
+    try:
+        with state_lock:
+            ws.send(json.dumps(build_status_payload()))
+        while True:
+            msg = ws.receive()
+            if msg is None:
+                break
+    finally:
+        with ws_lock:
+            ws_clients.discard(ws)
+
+def run_tcp_server():
     app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
 
+def receive_rear_video():
+    global latest_rear_frame
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind((HOST_IP, REAR_PORT))
+    print(f"[SERVER] 🟢 Listening for REAR camera on port {REAR_PORT}")
+    while True:
+        try:
+            data, _ = sock.recvfrom(MAX_DGRAM)
+            np_arr = np.frombuffer(data, dtype=np.uint8)
+            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            if frame is not None: latest_rear_frame = frame
+        except Exception as e:
+            pass
 
-def decode_packet(packet):
-    if packet is None:
-        return None
-    np_data = np.frombuffer(packet, dtype=np.uint8)
-    return cv2.imdecode(np_data, cv2.IMREAD_COLOR)
+def receive_front_video():
+    global latest_front_frame
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind((HOST_IP, FRONT_PORT))
+    print(f"[SERVER] 🔵 Listening for FRONT camera on port {FRONT_PORT}")
+    while True:
+        try:
+            data, _ = sock.recvfrom(MAX_DGRAM)
+            np_arr = np.frombuffer(data, dtype=np.uint8)
+            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            if frame is not None: latest_front_frame = frame
+        except Exception as e:
+            pass
 
+def send_control_payload_to_pi(payload):
+    # Sends CV_CONTROL data directly to the main command port
+    body = f"CV_CONTROL:{json.dumps(payload, separators=(',', ':'))}"
+    for pi_ip in PI_IPS:
+        tx_socket.sendto(body.encode('utf-8'), (pi_ip, PI_CMD_PORT))
 
+# --- MAIN THREAD: AI PROCESSING & DISPLAY ---
 def main():
-    global is_running
-
-    threading.Thread(target=run_flask_server, daemon=True).start()
-    print('[LAPTOP] Control API: http://0.0.0.0:5000 (POST /command, GET /status)')
-
-    print('[LAPTOP] Loading models...')
+    print('[LAPTOP] Loading AI Models... Please wait.')
     device = choose_device(DEFAULT_DEVICE)
     cfg = Config.fromfile(resolve_path(DEFAULT_CONFIG))
 
@@ -452,175 +328,114 @@ def main():
 
     YOLO = importlib.import_module('ultralytics').YOLO
     front_yolo = YOLO(resolve_path(DEFAULT_FRONT_YOLO))
-    front_names = front_yolo.names if hasattr(front_yolo, 'names') else None
     rear_pose = YOLO(resolve_path(DEFAULT_REAR_POSE))
+    print(f'[LAPTOP] Models loaded on {device}. Ready!')
 
-    print(f'[LAPTOP] Ready on device: {device}. Waiting for START...')
+    threading.Thread(target=run_tcp_server, daemon=True).start()
+    threading.Thread(target=receive_rear_video, daemon=True).start()
+    threading.Thread(target=receive_front_video, daemon=True).start()
 
-    last_rear_status = None
     frame_idx = 0
     cached_front_objects = []
-    yolo_stride = max(1, int(DEFAULT_FRONT_YOLO_STRIDE))
-    front_last_log_ts = time.time()
-    rear_last_log_ts = time.time()
 
-    front_danger_since_ts = None
-    front_out_of_lane_since_ts = None
-    front_extreme_corner_since_ts = None
+    print("[SERVER] 🖥️ Displaying video feeds. Press 'q' to quit.")
 
-    rear_status_since_ts = None
-    rear_lane_missing_since_ts = None
-    rear_foot_monitor_armed = False
+    while True:
+        if is_running:
+            front = latest_front_frame
+            rear = latest_rear_frame
+            control_payload = {'front': {'steering_deg': 0.0, 'stop_conditions': []}, 'rear': {'stop_conditions': []}}
 
-    try:
-        while True:
-            if not is_running or front_receiver is None or rear_receiver is None:
-                cv2.destroyAllWindows()
-                time.sleep(0.05)
-                continue
-
-            front_frame = decode_packet(front_receiver.get_latest_frame())
-            rear_frame = decode_packet(rear_receiver.get_latest_frame())
-
-            if front_frame is not None:
-                now = time.time()
+            if front is not None:
                 frame_idx += 1
-                vis_front, t_front = preprocess_frame(front_frame, cfg, device)
+                vis_front, t_front = preprocess_frame(front, cfg, device)
+                
                 with torch.inference_mode():
                     out_front = lane_model({'img': t_front})
                     lanes_front = lane_model.heads.get_lanes(out_front)[0]
-
                 lanes_xy_front = draw_lanes(vis_front, lanes_front, cfg, line_width=4)
-                if frame_idx % yolo_stride == 0:
+
+                if frame_idx % 2 == 0:
                     cached_front_objects = oD.get_objects(vis_front.copy(), front_yolo, conf_thres=0.3)
-                objects = cached_front_objects
-                alert_objects, warning_names, danger_names = classify_front_objects(
-                    objects, lanes_xy_front, vis_front.shape, front_names, close_ratio=DEFAULT_FRONT_CLOSE_RATIO
+
+                front_detection_output = build_front_detection(
+                    cached_front_objects,
+                    lanes_xy_front,
+                    vis_front.shape,
+                    front_yolo.names if hasattr(front_yolo, 'names') else None,
+                    close_ratio=0.7,
                 )
-                draw_front_objects(vis_front, alert_objects, front_names)
-
-                has_danger = any(obj.get('alert_level') == 'danger' for obj in alert_objects)
-                if has_danger:
-                    if front_danger_since_ts is None:
-                        front_danger_since_ts = now
-                else:
-                    front_danger_since_ts = None
-
-                front_out_of_lane_now = (lanes_xy_front is None or len(lanes_xy_front) == 0)
-                if front_out_of_lane_now:
-                    if front_out_of_lane_since_ts is None:
-                        front_out_of_lane_since_ts = now
-                else:
-                    front_out_of_lane_since_ts = None
-
+                front_stop_conditions = []
+                if len(front_detection_output['danger']) > 0:
+                    front_stop_conditions.append('If object is in lane')
+                if len(lanes_xy_front) == 0:
+                    front_stop_conditions.append('No lane Detected')
+                    front_stop_conditions.append('Robot out of lane')
+                
                 steer_helper = SteeringHelper(lanes_xy_front, frame_width=vis_front.shape[1], n_samples=20, threshold=10)
-                raw_angle = steer_helper.heading_angle
-                angle_extreme_now = abs(raw_angle) >= math.radians(BIG_ANGLE_THRESHOLD)
-                if angle_extreme_now:
-                    if front_extreme_corner_since_ts is None:
-                        front_extreme_corner_since_ts = now
-                else:
-                    front_extreme_corner_since_ts = None
+                steer_angle = max(min(steer_helper.heading_angle, math.radians(45)), -math.radians(45))
+                control_payload['front']['steering_deg'] = round(math.degrees(steer_angle), 2)
+                control_payload['front']['stop_conditions'] = front_stop_conditions
 
-                max_angle = math.radians(45)
-                steer_angle = max(min(raw_angle, max_angle), -max_angle)
-                robot_status = 'LARGE_ANGLE' if angle_extreme_now else ('OUT_OF_LANE' if front_out_of_lane_now else 'NORMAL')
-
-                front_lines = get_front_outline(alert_objects)
-
-                for i, line in enumerate(front_lines):
-                    color = (0, 165, 255) if line.startswith('Warning') else (0, 0, 255)
-                    cv2.putText(vis_front, line, (20, 40 + i * 32),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2, cv2.LINE_AA)
-
-                if (now - front_last_log_ts) >= LOG_INTERVAL_SECONDS:
-                    front_detection_output = get_front_object_detection_output(alert_objects)
-                    front_stop_conditions = get_front_stop_conditions(
-                        now,
-                        front_danger_since_ts,
-                        front_out_of_lane_since_ts,
-                        front_extreme_corner_since_ts,
-                    )
-                    print(f'Robot Status: {robot_status}, Steering Angle: {math.degrees(steer_angle):.2f} degrees')
-                    print(f'Object detection: {front_detection_output}')
-                    print(f'Stopping the Robot: {front_stop_conditions}')
-                    front_last_log_ts = now
+                robot_status = 'OUT_OF_LANE' if len(lanes_xy_front) == 0 else 'NORMAL'
+                if abs(steer_helper.heading_angle) >= math.radians(70):
+                    robot_status = 'LARGE_ANGLE'
+                    control_payload['front']['stop_conditions'].append('Corner Angle too extreme')
 
                 with state_lock:
-                    latest_state['front'] = {'warning': warning_names, 'danger': danger_names}
+                    latest_state['front'] = {
+                        'robot_status': robot_status,
+                        'object_detection': front_detection_output,
+                    }
+                broadcast_status()
 
-                cv2.imshow('Front CV', vis_front)
+                cv2.imshow("Front AI Camera", vis_front)
 
-            if rear_frame is not None:
-                now = time.time()
-                vis_rear, t_rear = preprocess_frame(rear_frame, cfg, device)
+            if rear is not None:
+                vis_rear, t_rear = preprocess_frame(rear, cfg, device)
+                
                 with torch.inference_mode():
                     out_rear = lane_model({'img': t_rear})
                     lanes_rear = lane_model.heads.get_lanes(out_rear)[0]
-
                 lanes_xy_rear = draw_lanes(vis_rear, lanes_rear, cfg, line_width=4)
-                rear_lane_missing_now = (lanes_xy_rear is None or len(lanes_xy_rear) == 0)
-                if rear_lane_missing_now:
-                    if rear_lane_missing_since_ts is None:
-                        rear_lane_missing_since_ts = now
-                else:
-                    rear_lane_missing_since_ts = None
 
                 left_ankle, right_ankle = pD.get_ankle(vis_rear.copy(), rear_pose)
-                status, left_in, right_in = feet_status(left_ankle, right_ankle, lanes_xy_rear)
+                rear_status, _, _ = feet_status(left_ankle, right_ankle, lanes_xy_rear)
+                rear_detection_output = build_rear_detection(rear_status)
+                rear_stop_conditions = []
+                if rear_status == 'Left out':
+                    rear_stop_conditions.append('Left foot out')
+                elif rear_status == 'Right out':
+                    rear_stop_conditions.append('Right foot out')
+                elif rear_status == 'Both out':
+                    rear_stop_conditions.append('Both feet out')
+                elif rear_status == 'No feet detected':
+                    rear_stop_conditions.append('No feet detected')
+                if len(lanes_xy_rear) == 0:
+                    rear_stop_conditions.append('No lane Detected')
+                    rear_stop_conditions.append('Robot out of lane')
 
-                left_color = (0, 255, 0) if left_in else (0, 0, 255)
-                right_color = (0, 255, 0) if right_in else (0, 0, 255)
-                status_color = (0, 255, 0) if status == 'Safe' else (0, 0, 255)
-
-                draw_foot(vis_rear, normalize_point(left_ankle), left_color, 'L')
-                draw_foot(vis_rear, normalize_point(right_ankle), right_color, 'R')
-                cv2.putText(vis_rear, status, (20, 40), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.9, status_color, 2, cv2.LINE_AA)
-
-                if status != last_rear_status:
-                    send_to_pi(f'REAR_STATUS:{status}', PI_STATUS_PORT)
-                    rear_status_since_ts = now
-                elif rear_status_since_ts is None:
-                    rear_status_since_ts = now
-                last_rear_status = status
-
-                if status == 'Safe':
-                    rear_foot_monitor_armed = True
-
-                status_duration = 0.0 if rear_status_since_ts is None else (now - rear_status_since_ts)
-                lane_missing_duration = 0.0 if rear_lane_missing_since_ts is None else (now - rear_lane_missing_since_ts)
-                rear_detection_output = get_rear_object_detection_output(status)
-                rear_stop_conditions = get_rear_stop_conditions(
-                    status,
-                    status_duration,
-                    lane_missing_duration,
-                    rear_foot_monitor_armed,
-                )
-
-                if (now - rear_last_log_ts) >= LOG_INTERVAL_SECONDS:
-                    print(f'Object detection: {rear_detection_output}')
-                    print(f'Stopping the Robot: {rear_stop_conditions}')
-                    rear_last_log_ts = now
+                control_payload['rear']['stop_conditions'] = rear_stop_conditions
 
                 with state_lock:
-                    latest_state['rear'] = {'status': status}
+                    latest_state['rear'] = {
+                        'status': rear_status,
+                        'object_detection': rear_detection_output,
+                    }
+                broadcast_status()
 
-                cv2.imshow('Rear CV', vis_rear)
+                cv2.imshow("Rear Backup Camera", vis_rear)
 
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
+            # Fire off the steering data
+            send_control_payload_to_pi(control_payload)
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
+        else:            
+            cv2.destroyAllWindows()
+            time.sleep(0.1)
 
-    except KeyboardInterrupt:
-        pass
-    finally:
-        if front_receiver:
-            front_receiver.stop()
-        if rear_receiver:
-            rear_receiver.stop()
-        cv2.destroyAllWindows()
+    cv2.destroyAllWindows()
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
