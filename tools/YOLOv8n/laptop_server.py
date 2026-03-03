@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import cv2
 import time
@@ -11,6 +12,10 @@ import numpy as np
 from flask import Flask, request, jsonify
 from flask_sock import Sock
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 # --- AI & AUTONOMY IMPORTS ---
 from clrnet.models.registry import build_net
 from clrnet.utils.config import Config
@@ -19,7 +24,6 @@ import poseDetector as pD
 from tools.helper.steering_helper import SteeringHelper
 
 # --- CONFIGURATION ---
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 HOST_IP = "0.0.0.0"
 FRONT_PORT = 8000
 REAR_PORT = 8002
@@ -53,11 +57,14 @@ latest_state = {
     'running': False,
     'front': {
         'robot_status': 'NORMAL',
+        'ANGLE': 'ANGLE=0.00',
         'object_detection': {'warning': [], 'danger': []},
+        'stop_conditions': [],
     },
     'rear': {
         'status': 'No feet detected',
         'object_detection': {'warning': [], 'danger': []},
+        'stop_conditions': [],
     },
 }
 
@@ -206,11 +213,14 @@ def build_status_payload():
         'running': latest_state.get('running', False),
         'front': {
             'robot_status': latest_state.get('front', {}).get('robot_status', 'NORMAL'),
+            'ANGLE': latest_state.get('front', {}).get('ANGLE', 'ANGLE=0.00'),
             'object_detection': latest_state.get('front', {}).get('object_detection', {'warning': [], 'danger': []}),
+            'stop_conditions': latest_state.get('front', {}).get('stop_conditions', []),
         },
         'rear': {
             'status': latest_state.get('rear', {}).get('status', 'No feet detected'),
             'object_detection': latest_state.get('rear', {}).get('object_detection', {'warning': [], 'danger': []}),
+            'stop_conditions': latest_state.get('rear', {}).get('stop_conditions', []),
         },
     }
 
@@ -239,6 +249,13 @@ def broadcast_status(force=False):
         for ws in dead:
             ws_clients.discard(ws)
 
+
+def forward_command_to_pi(command):
+    """Forward START/STOP command to all configured Pi IPs."""
+    payload = f"{command}\n".encode('utf-8')
+    for pi_ip in PI_IPS:
+        tx_socket.sendto(payload, (pi_ip, PI_CMD_PORT))
+
 # --- NETWORKING THREADS ---
 @app.route('/command', methods=['POST'])
 def receive_command():
@@ -248,8 +265,7 @@ def receive_command():
     if command in ["START", "STOP"]:
         is_running = (command == "START")
         print(f"📱 APP SAYS {command}: Forwarding to Pi...")
-        for pi_ip in PI_IPS:
-            tx_socket.sendto(f"{command}\n".encode('utf-8'), (pi_ip, PI_CMD_PORT))
+        forward_command_to_pi(command)
         with state_lock:
             latest_state['running'] = is_running
         broadcast_status(force=True)
@@ -309,14 +325,15 @@ def receive_front_video():
         except Exception as e:
             pass
 
-def send_control_payload_to_pi(payload):
-    # Sends CV_CONTROL data directly to the main command port
-    body = f"CV_CONTROL:{json.dumps(payload, separators=(',', ':'))}"
+def send_angle_to_pi(angle_deg):
+    # Sends plain-text steering to Pi (no JSON)
+    body = f"ANGLE={angle_deg:.2f}"
     for pi_ip in PI_IPS:
         tx_socket.sendto(body.encode('utf-8'), (pi_ip, PI_CMD_PORT))
 
 # --- MAIN THREAD: AI PROCESSING & DISPLAY ---
 def main():
+    global is_running
     print('[LAPTOP] Loading AI Models... Please wait.')
     device = choose_device(DEFAULT_DEVICE)
     cfg = Config.fromfile(resolve_path(DEFAULT_CONFIG))
@@ -344,7 +361,9 @@ def main():
         if is_running:
             front = latest_front_frame
             rear = latest_rear_frame
-            control_payload = {'front': {'steering_deg': 0.0, 'stop_conditions': []}, 'rear': {'stop_conditions': []}}
+            latest_angle_deg = 0.0
+            front_stop_conditions = []
+            rear_stop_conditions = []
 
             if front is not None:
                 frame_idx += 1
@@ -365,7 +384,6 @@ def main():
                     front_yolo.names if hasattr(front_yolo, 'names') else None,
                     close_ratio=0.7,
                 )
-                front_stop_conditions = []
                 if len(front_detection_output['danger']) > 0:
                     front_stop_conditions.append('If object is in lane')
                 if len(lanes_xy_front) == 0:
@@ -374,18 +392,19 @@ def main():
                 
                 steer_helper = SteeringHelper(lanes_xy_front, frame_width=vis_front.shape[1], n_samples=20, threshold=10)
                 steer_angle = max(min(steer_helper.heading_angle, math.radians(45)), -math.radians(45))
-                control_payload['front']['steering_deg'] = round(math.degrees(steer_angle), 2)
-                control_payload['front']['stop_conditions'] = front_stop_conditions
+                latest_angle_deg = round(math.degrees(steer_angle), 2)
 
                 robot_status = 'OUT_OF_LANE' if len(lanes_xy_front) == 0 else 'NORMAL'
                 if abs(steer_helper.heading_angle) >= math.radians(70):
                     robot_status = 'LARGE_ANGLE'
-                    control_payload['front']['stop_conditions'].append('Corner Angle too extreme')
+                    front_stop_conditions.append('Corner Angle too extreme')
 
                 with state_lock:
                     latest_state['front'] = {
                         'robot_status': robot_status,
+                        'ANGLE': f'ANGLE={latest_angle_deg:.2f}',
                         'object_detection': front_detection_output,
+                        'stop_conditions': front_stop_conditions,
                     }
                 broadcast_status()
 
@@ -402,7 +421,6 @@ def main():
                 left_ankle, right_ankle = pD.get_ankle(vis_rear.copy(), rear_pose)
                 rear_status, _, _ = feet_status(left_ankle, right_ankle, lanes_xy_rear)
                 rear_detection_output = build_rear_detection(rear_status)
-                rear_stop_conditions = []
                 if rear_status == 'Left out':
                     rear_stop_conditions.append('Left foot out')
                 elif rear_status == 'Right out':
@@ -415,19 +433,28 @@ def main():
                     rear_stop_conditions.append('No lane Detected')
                     rear_stop_conditions.append('Robot out of lane')
 
-                control_payload['rear']['stop_conditions'] = rear_stop_conditions
-
                 with state_lock:
                     latest_state['rear'] = {
                         'status': rear_status,
                         'object_detection': rear_detection_output,
+                        'stop_conditions': rear_stop_conditions,
                     }
                 broadcast_status()
 
                 cv2.imshow("Rear Backup Camera", vis_rear)
 
-            # Fire off the steering data
-            send_control_payload_to_pi(control_payload)
+            combined_stop_conditions = front_stop_conditions + rear_stop_conditions
+            if len(combined_stop_conditions) > 0:
+                print(f"[AUTO-STOP] CV triggered STOP: {combined_stop_conditions}")
+                forward_command_to_pi('STOP')
+                is_running = False
+                with state_lock:
+                    latest_state['running'] = False
+                broadcast_status(force=True)
+                continue
+
+            # Fire off plain-text steering data to Pi (no JSON)
+            send_angle_to_pi(latest_angle_deg)
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break

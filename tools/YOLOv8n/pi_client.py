@@ -3,7 +3,6 @@ import time
 import socket
 import threading
 import importlib
-import json
 
 try:
     serial = importlib.import_module('serial')
@@ -143,25 +142,17 @@ class PiBridge:
         print(f'[PI] 🎧 Listening for System Commands and CV Control on port {CMD_PORT}')
         while self.running:
             try:
-                # Need a larger buffer (4096) because JSON CV_CONTROL payloads are much bigger than simple "START" text
-                data, _ = self.cmd_sock.recvfrom(4096)
+                data, _ = self.cmd_sock.recvfrom(1024)
                 msg = data.decode('utf-8', errors='ignore').strip()
                 if not msg:
                     continue
 
-                # 1. Traffic Director: Is it an Autonomy JSON Payload?
-                if msg.startswith("CV_CONTROL:"):
-                    json_string = msg.replace("CV_CONTROL:", "")
-                    try:
-                        control_data = json.loads(json_string)
-                        # Extract the steering angle and forward it to Arduino
-                        if 'front' in control_data and 'steering_deg' in control_data['front']:
-                            steer = control_data['front']['steering_deg']
-                            self._write_arduino(f"STEER:{steer}")
-                    except json.JSONDecodeError:
-                        print(f"[PI] ⚠️ Failed to parse CV_CONTROL JSON: {json_string}")
+                # 1. Steering command from laptop (plain text)
+                if msg.startswith("ANGLE="):
+                    angle_value = msg.split("=", 1)[1].strip()
+                    self._write_arduino(f"STEER:{angle_value}")
 
-                # 2. Traffic Director: Is it a System Command?
+                # 2. System command
                 else:
                     print(f'[PI] CMD <- {msg}')
                     cmd = msg.upper()
