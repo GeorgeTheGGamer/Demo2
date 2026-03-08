@@ -23,7 +23,7 @@ import poseDetector as pD
 DEFAULT_CONFIG = 'configs/clrnet/clr_resnet18_tusimple.py'
 DEFAULT_CHECKPOINT = 'checkpoints/tusimple_r18.pth'
 DEFAULT_SOURCE = '0'
-DEFAULT_DEVICE = 'mps'  # 'auto' | 'cuda' | 'mps' | 'cpu'
+DEFAULT_DEVICE = 'auto'  # 'auto' | 'cuda' | 'mps' | 'cpu'
 DEFAULT_POSE_MODEL = 'checkpoints/yolov8n-pose_int8.tflite'
 LOG_INTERVAL_SECONDS = 5.0
 FOOT_OUT_STOP_SECONDS = 3.0
