@@ -39,8 +39,6 @@ def draw_keypoint(img, point, label, color):
 def calculate_midpoint(left_ankle, right_ankle):
     """
     Calculate the midpoint between left and right ankles.
-    :param left_ankle: left ankle coordinate [x, y]
-    :param right_ankle: right ankle coordinate [x, y]
     :return: midpoint coordinate [x, y] or None if either ankle is None
     """
     if left_ankle is None or right_ankle is None:

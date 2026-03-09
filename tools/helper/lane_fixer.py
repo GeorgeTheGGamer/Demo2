@@ -9,7 +9,8 @@ class LaneFixer:
     """
 
     def __init__(self, lane_width=None, samples=20, threshold=1.1):
-        self.last_width = lane_width
+        self.saved_width = None
+        self.last_width = None
         self.lane_width = lane_width
         self.threshold = threshold
         self.samples = samples
@@ -42,20 +43,20 @@ class LaneFixer:
             return lanes
 
         # One side missing — need last_width to synthesise
-        if self.last_width is None:
+        if self.saved_width is None:
             return lanes
 
         result = list(lanes)  # shallow copy – originals are untouched
 
         if right_miss and not left_miss:
             anchor_lanes = [l for l in lanes if self._mean_x(l) <= cx]
-            synthetic = self._synthesise(anchor_lanes, shift=+self.last_width, n_samples=n_samples)
+            synthetic = self._synthesise(anchor_lanes, shift=+self.saved_width, n_samples=n_samples)
             if synthetic:
                 result.append(synthetic)
 
         elif left_miss and not right_miss:
             anchor_lanes = [l for l in lanes if self._mean_x(l) > cx]
-            synthetic = self._synthesise(anchor_lanes, shift=-self.last_width, n_samples=n_samples)
+            synthetic = self._synthesise(anchor_lanes, shift=-self.saved_width, n_samples=n_samples)
             if synthetic:
                 result.insert(0, synthetic)
 
@@ -79,13 +80,16 @@ class LaneFixer:
         if w is None:
             return
         if self.last_width is None:
-            # First valid observation — accept unconditionally
             self.last_width = w
+            return
+        if self.saved_width is None:
+            # First valid observation — accept unconditionally
+            self.saved_width = w
         else:
             lo = self.last_width / self.threshold
             hi = self.last_width * self.threshold
             if lo <= w <= hi:
-                self.last_width = w
+                self.saved_width = w
             # else: change is too large (outlier) — silently ignore
 
     @staticmethod

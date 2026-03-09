@@ -130,9 +130,6 @@ class SteeringHelper:
 
     def heading_from_centerline(self):
         """
-        idx1, idx2: indices of points to calculate heading.
-        center_points are sampled from y_min (near horizon) to y_max (near car),
-        so idx2 > idx1 means the vector points from horizon toward the car.
         To express "forward" direction (car → horizon), we negate the vector.
         return: heading angle in radians, where 0 means straight ahead,
         positive is left turn, negative is right turn.
