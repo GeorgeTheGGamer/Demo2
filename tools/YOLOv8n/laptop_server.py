@@ -12,6 +12,8 @@ import numpy as np
 from flask import Flask, request, jsonify
 from flask_sock import Sock
 
+from tools.helper.focus_helper import FocusHelper
+
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -22,6 +24,7 @@ from clrnet.utils.config import Config
 import objectDetector as oD
 import poseDetector as pD
 from tools.helper.steering_helper import SteeringHelper
+from tools.helper.lane_fixer import LaneFixer
 
 # --- CONFIGURATION ---
 HOST_IP = "0.0.0.0"
@@ -118,19 +121,46 @@ def preprocess_frame(frame, cfg, device):
     tensor = torch.from_numpy(img).unsqueeze(0).to(device)
     return frame, tensor
 
-def draw_lanes(frame, lanes, cfg, line_width=4):
+def draw_lanes(frame, lanes_xy, line_width=4):
+    colors = [
+        (255, 0, 0), (0, 255, 0), (0, 0, 255),
+        (255, 255, 0), (255, 0, 255), (0, 255, 255),
+    ]
+    for i, xy in enumerate(lanes_xy):
+        if len(xy) < 2:
+            continue
+        color = colors[i % len(colors)]
+        for j in range(1, len(xy)):
+            cv2.line(frame, xy[j - 1], xy[j], color, thickness=line_width)
+
+def extract_lane_xy(lanes, cfg, frame_shape):
     lanes_xy = []
-    h, w = frame.shape[:2]
-    colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
-    for i, lane in enumerate(lanes):
+    h, w = frame_shape[:2]
+    for lane in lanes:
         pts = lane.to_array(cfg)
-        xy = [(int(round(p[0])), int(round(p[1]))) for p in pts if 0 <= p[0] < w and 0 <= p[1] < h]
+        xy = []
+        for p in pts:
+            x, y = int(round(p[0])), int(round(p[1]))
+            if 0 <= x < w and 0 <= y < h:
+                xy.append((x, y))
         if len(xy) >= 2:
             lanes_xy.append(xy)
-            color = colors[i % len(colors)]
-            for j in range(1, len(xy)):
-                cv2.line(frame, xy[j - 1], xy[j], color, thickness=line_width)
+    lanes_xy.sort(key=lambda xys: xys[0][0])
     return lanes_xy
+#
+# def draw_lanes(frame, lanes, cfg, line_width=4):
+#     lanes_xy = []
+#     h, w = frame.shape[:2]
+#     colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
+#     for i, lane in enumerate(lanes):
+#         pts = lane.to_array(cfg)
+#         xy = [(int(round(p[0])), int(round(p[1]))) for p in pts if 0 <= p[0] < w and 0 <= p[1] < h]
+#         if len(xy) >= 2:
+#             lanes_xy.append(xy)
+#             color = colors[i % len(colors)]
+#             for j in range(1, len(xy)):
+#                 cv2.line(frame, xy[j - 1], xy[j], color, thickness=line_width)
+#     return lanes_xy
 
 
 def interpolate_x_at_y(polyline, y):
@@ -363,7 +393,7 @@ def receive_front_video():
         except Exception as e:
             pass
 
-def send_angle_to_pi(angle_deg):
+def send_angle_to_pi(angle_front, angle_rear):
     global pi_started
     # On the very first angle of a run, send START to Pi first so it is ready to move.
     # Guard with is_running to avoid a race where STOP arrives mid-loop.
@@ -374,7 +404,7 @@ def send_angle_to_pi(angle_deg):
         forward_command_to_pi('START')
         pi_started = True
     # Sends plain-text steering to Pi (no JSON)
-    body = f"ANGLE={angle_deg:.2f}"
+    body = f"ANGLE_FRONT={angle_front:.2f}, ANGLE_REAR={angle_rear:.2f}\n"
     for pi_ip in PI_IPS:
         print(f"[PI STEER] {body} -> {pi_ip}:{PI_CMD_PORT}")
         tx_socket.sendto(body.encode('utf-8'), (pi_ip, PI_CMD_PORT))
@@ -440,6 +470,51 @@ def draw_ankle_point(frame, pt, color, label):
     cv2.circle(frame, (x, y), 7, color, -1)
     cv2.putText(frame, label, (x + 8, y - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
+def calculate_midpoint(left_ankle, right_ankle):
+    """
+    Calculate the midpoint between left and right ankles.
+    :return: midpoint coordinate [x, y] or None if either ankle is None
+    """
+    if left_ankle is None or right_ankle is None:
+        return None
+
+    x_mid = (left_ankle[0] + right_ankle[0]) / 2
+    y_mid = (left_ankle[1] + right_ankle[1]) / 2
+
+    return [x_mid, y_mid]
+
+def calculate_angle_to_center(midpoint, frame):
+    frame_height, frame_width = frame.shape[:2]
+    if midpoint is None:
+        return None
+
+    # Vector from midpoint to top-center (frame_width/2, 0)
+    center_x = frame_width / 2
+    dx = midpoint[0] - center_x
+    dy = 0 - midpoint[1]
+    angle_x = np.degrees(np.arctan2(dx, -dy))
+
+    return angle_x
+
+def visualize_angle(frame, angle):
+    if angle is None:
+        return
+    h, w = frame.shape[:2]
+    center_x = w // 2
+    center_y = h - 50
+    length = 100
+    end_x = int(center_x + length * np.sin(np.radians(angle)))
+    end_y = int(center_y - length * np.cos(np.radians(angle)))
+    cv2.arrowedLine(frame, (center_x, center_y), (end_x, end_y), (255, 0, 255), 3)
+    cv2.putText(frame,
+                f'Angle: {angle:.1f} deg',
+                (center_x - 60, center_y - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 0, 255),
+                2,
+                cv2.LINE_AA)
+
 # --- MAIN THREAD: AI PROCESSING & DISPLAY ---
 def main():
     global is_running, cv_ready, condition_since, last_auto_stop_send_ts
@@ -455,6 +530,12 @@ def main():
     YOLO = importlib.import_module('ultralytics').YOLO
     front_yolo = YOLO(resolve_path(DEFAULT_FRONT_YOLO))
     rear_pose = YOLO(resolve_path(DEFAULT_REAR_POSE))
+
+    # Init helpers
+    ankle_focus = FocusHelper()
+    front_fixer = LaneFixer()
+    rear_fixer = LaneFixer()
+
     print(f'[LAPTOP] Models loaded on {device}. Ready!')
 
     # --- Synthetic warmup: force MPS kernel compilation before any real frame ---
@@ -503,6 +584,7 @@ def main():
 
         if is_running:
             latest_angle_deg = 0.0
+            angle_rear = 0.0
             front_stop_conditions = []
             rear_stop_conditions = []
 
@@ -513,7 +595,11 @@ def main():
                 with torch.inference_mode():
                     out_front = lane_model({'img': t_front})
                     lanes_front = lane_model.heads.get_lanes(out_front)[0]
-                lanes_xy_front = draw_lanes(vis_front, lanes_front, cfg, line_width=4)
+
+                # Fix lanes and update lanes
+                lanes_xy_front = extract_lane_xy(lanes_front, cfg, vis_front.shape)
+                lanes_xy_front = front_fixer.fix(lanes_xy_front, frame_width=vis_front.shape[1])
+                draw_lanes(vis_front, lanes_xy_front)
 
                 if frame_idx % 2 == 0:
                     cached_front_objects = oD.get_objects(vis_front.copy(), front_yolo, conf_thres=0.3)
@@ -564,11 +650,26 @@ def main():
                 with torch.inference_mode():
                     out_rear = lane_model({'img': t_rear})
                     lanes_rear = lane_model.heads.get_lanes(out_rear)[0]
-                lanes_xy_rear = draw_lanes(vis_rear, lanes_rear, cfg, line_width=4)
 
-                left_ankle, right_ankle = pD.get_ankle(vis_rear.copy(), rear_pose)
+                # Fix lanes and update lanes
+                lanes_xy_rear = extract_lane_xy(lanes_rear, cfg, vis_rear.shape)
+                lanes_xy_rear = rear_fixer.fix(lanes_xy_rear, frame_width=vis_rear.shape[1])
+                draw_lanes(vis_rear, lanes_xy_rear)
+
+                # left_ankle, right_ankle = pD.get_ankle(vis_rear.copy(), rear_pose)
+                # Get the focused ankle points using the FocusHelper, which may provide more stable detections by focusing on the expected person
+                ankles = pD.get_ankles(vis_rear.copy(), rear_pose)
+                ankle_focus.update_frame_size(vis_rear.shape[1], vis_rear.shape[0])
+                left_ankle, right_ankle = ankle_focus.focus(ankles)
                 draw_ankle_point(vis_rear, left_ankle, (0, 255, 255), 'L ankle')
                 draw_ankle_point(vis_rear, right_ankle, (255, 0, 255), 'R ankle')
+
+                # Calculate midpoint and angle to center for rear display and potential future use
+                midpoint = calculate_midpoint(left_ankle, right_ankle)
+                draw_ankle_point(vis_rear, normalize_point(midpoint), (255, 255, 0), 'M')
+                angle_rear = calculate_angle_to_center(midpoint, vis_rear)
+                visualize_angle(vis_rear, angle_rear)
+
                 rear_status, _, _ = feet_status(left_ankle, right_ankle, lanes_xy_rear)
                 rear_detection_output = build_rear_detection(rear_status)
                 if rear_status == 'Left out':
@@ -656,7 +757,7 @@ def main():
 
             # Always send steering updates; Arduino/Pi can decide what to do while STOP is active.
             if is_running:
-                send_angle_to_pi(latest_angle_deg)
+                send_angle_to_pi(latest_angle_deg, angle_rear)
 
             # Push state at steady cadence while running (even if one stream is delayed)
             with state_lock:
