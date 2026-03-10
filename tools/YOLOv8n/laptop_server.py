@@ -8,6 +8,7 @@ import torch
 import socket
 import importlib
 import threading
+from collections import deque
 import numpy as np
 from flask import Flask, request, jsonify
 from flask_sock import Sock
@@ -52,6 +53,19 @@ pi_started = False
 condition_since = {}   # { 'front:<cond>' | 'rear:<cond>' : first_seen_timestamp }
 last_auto_stop_send_ts = 0.0
 
+# Steering hold state: tracks the current candidate servo value and when it was first seen
+_steer_candidate = {'servo': None, 'since': 0.0}
+
+# Rear servo state: tracks last committed servo value and last time feet were detected
+_rear_servo_state = {'servo': 90, 'last_seen': 0.0}
+
+# Frame timestamps — updated by receive threads; used for staleness checks
+front_frame_ts = 0.0
+rear_frame_ts  = 0.0
+
+# Timestamp of the most recent auto-stop (used for auto-resume)
+auto_stop_ts = 0.0
+
 tx_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 app = Flask(__name__)
 sock = Sock(app)
@@ -77,17 +91,42 @@ HOLD_NO_FEET_SEC           = 15.0   # Rear: no ankles detected at all
 HOLD_REAR_NO_LANE_SEC      = 8.0   # Rear: CLRNet detects 0 lanes
 HOLD_REAR_OUT_LANE_SEC     = 8.0   # Rear: robot out of lane
 
+# How long (seconds) the heading angle must remain within the same servo
+# threshold band before the servo is actually updated. Prevents jitter on
+# borderline angles and makes turning smoother.
+STEER_HOLD_SEC = 3.0
+
+# How long (seconds) with no feet detected before the rear servo resets to 90° (centre).
+REAR_NO_FEET_HOLD_SEC = 5.0
+
+# Max age (seconds) of a camera frame before it is treated as stale / no stream.
+FRAME_MAX_AGE_SEC = 6.0
+
+# Majority-vote steering: number of recent frames to consider and minimum
+# agreement count required before a new servo value is committed.
+# E.g. window=10, threshold=7 means 7/10 frames must agree.
+STEER_VOTE_WINDOW    = 10   # rolling window size
+STEER_VOTE_THRESHOLD = 7    # minimum votes needed (out of STEER_VOTE_WINDOW)
+
+# Auto-resume after auto-STOP: seconds after which the system automatically
+# restarts if all stop conditions have cleared. Set to 0 to disable.
+AUTO_RESUME_SEC = 5.0
+
+# Rolling window of recent servo candidates for majority-vote steering
+_angle_window: deque = deque(maxlen=STEER_VOTE_WINDOW)
+
 latest_state = {
     'running': False,
     'auto_stop_reason': [],
     'front': {
         'robot_status': 'NORMAL',
-        'ANGLE': 'ANGLE=0.00',
+        'FRONT_ANGLE': 'FRONT_ANGLE=90',
         'object_detection': {'warning': [], 'danger': []},
         'stop_conditions': [],
     },
     'rear': {
         'status': 'No feet detected',
+        'REAR_ANGLE': 'REAR_ANGLE=90',
         'object_detection': {'warning': [], 'danger': []},
         'stop_conditions': [],
     },
@@ -267,12 +306,13 @@ def build_status_payload():
         'auto_stop_reason': latest_state.get('auto_stop_reason', []),
         'front': {
             'robot_status': latest_state.get('front', {}).get('robot_status', 'NORMAL'),
-            'ANGLE': latest_state.get('front', {}).get('ANGLE', 'ANGLE=0.00'),
+            'FRONT_ANGLE': latest_state.get('front', {}).get('FRONT_ANGLE', 'FRONT_ANGLE=90'),
             'object_detection': latest_state.get('front', {}).get('object_detection', {'warning': [], 'danger': []}),
             'stop_conditions': latest_state.get('front', {}).get('stop_conditions', []),
         },
         'rear': {
             'status': latest_state.get('rear', {}).get('status', 'No feet detected'),
+            'REAR_ANGLE': latest_state.get('rear', {}).get('REAR_ANGLE', 'REAR_ANGLE=90'),
             'object_detection': latest_state.get('rear', {}).get('object_detection', {'warning': [], 'danger': []}),
             'stop_conditions': latest_state.get('rear', {}).get('stop_conditions', []),
         },
@@ -311,6 +351,20 @@ def forward_command_to_pi(command):
         print(f"[PI CMD] {command} -> {pi_ip}:{PI_CMD_PORT}")
         tx_socket.sendto(payload, (pi_ip, PI_CMD_PORT))
 
+
+def reset_steering_to_default():
+    """Send both servos back to 90° (straight) and clear all hold-timer state."""
+    global _steer_candidate, _rear_servo_state, _angle_window
+    _steer_candidate = {'servo': None, 'since': 0.0}
+    _rear_servo_state = {'servo': 90, 'last_seen': 0.0}
+    _angle_window.clear()
+    body = "FRONT_ANGLE=90,REAR_ANGLE=90"
+    for _ in range(3):  # send 3 times to survive UDP packet drops
+        for pi_ip in PI_IPS:
+            print(f"[PI STEER] RESET -> {body} -> {pi_ip}:{PI_CMD_PORT}")
+            tx_socket.sendto(body.encode('utf-8'), (pi_ip, PI_CMD_PORT))
+        time.sleep(0.05)
+
 # --- NETWORKING THREADS ---
 @app.route('/command', methods=['POST'])
 def receive_command():
@@ -333,6 +387,7 @@ def receive_command():
         is_running = False
         print('📱 APP SAYS STOP: Forwarding to Pi...')
         forward_command_to_pi('STOP')
+        reset_steering_to_default()
         with state_lock:
             latest_state['running'] = False
         broadcast_status(force=True)
@@ -366,7 +421,7 @@ def run_tcp_server():
     app.run(host='0.0.0.0', port=API_PORT, debug=False, use_reloader=False)
 
 def receive_rear_video():
-    global latest_rear_frame
+    global latest_rear_frame, rear_frame_ts
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((HOST_IP, REAR_PORT))
     print(f"[SERVER] 🟢 Listening for REAR camera on port {REAR_PORT}")
@@ -375,12 +430,14 @@ def receive_rear_video():
             data, _ = sock.recvfrom(MAX_DGRAM)
             np_arr = np.frombuffer(data, dtype=np.uint8)
             frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-            if frame is not None: latest_rear_frame = frame
+            if frame is not None:
+                latest_rear_frame = frame
+                rear_frame_ts = time.time()
         except Exception as e:
             pass
 
 def receive_front_video():
-    global latest_front_frame
+    global latest_front_frame, front_frame_ts
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((HOST_IP, FRONT_PORT))
     print(f"[SERVER] 🔵 Listening for FRONT camera on port {FRONT_PORT}")
@@ -389,11 +446,98 @@ def receive_front_video():
             data, _ = sock.recvfrom(MAX_DGRAM)
             np_arr = np.frombuffer(data, dtype=np.uint8)
             frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-            if frame is not None: latest_front_frame = frame
+            if frame is not None:
+                latest_front_frame = frame
+                front_frame_ts = time.time()
         except Exception as e:
             pass
 
-def send_angle_to_pi(angle_front, angle_rear):
+def angle_deg_to_servo(angle_deg: float) -> int:
+    """
+    Map heading angle (-45 to +45 degrees) to fixed servo constants (45-135).
+    Positive angle = turn right -> higher servo value (towards 135)
+    Negative angle = turn left  -> lower servo value  (towards 45)
+    90 = straight ahead. Dead-band: ±10° to account for angle inaccuracy.
+    Fixed constants: 45, 55, 65, 80, 90, 100, 115, 125, 135
+    """
+    a = angle_deg
+    if a >= 38:
+        return 135      # Hard Right
+    elif a >= 28:
+        return 125      # Moderate Right
+    elif a >= 18:
+        return 115      # Slight Right
+    elif a >= 10:
+        return 100      # Nudge Right
+    elif a >= -10:
+        return 90       # Straight  ← ±10° dead-band
+    elif a >= -17:
+        return 80       # Nudge Left
+    elif a >= -27:
+        return 65       # Slight Left
+    elif a >= -37:
+        return 55       # Moderate Left
+    else:
+        return 45       # Hard Left
+
+
+def angle_deg_to_servo_held(angle_deg: float) -> int | None:
+    """
+    Majority-vote steering: collects servo candidates into a rolling window
+    (STEER_VOTE_WINDOW frames) and only commits a value when at least
+    STEER_VOTE_THRESHOLD frames agree. Returns None until consensus is reached.
+    """
+    global _angle_window
+    candidate = angle_deg_to_servo(angle_deg)
+    _angle_window.append(candidate)
+
+    if len(_angle_window) < STEER_VOTE_WINDOW:
+        return None  # window not yet full
+
+    majority = max(set(_angle_window), key=_angle_window.count)
+    if _angle_window.count(majority) >= STEER_VOTE_THRESHOLD:
+        return majority
+
+    return None  # no consensus yet
+
+
+def rear_angle_to_servo(angle_deg: float) -> int:
+    """
+    Map rear heading angle (-45 to +45 degrees) to a servo value in 5-degree
+    increments between 45 and 135.
+    Positive angle = person to the right -> higher servo (towards 135)
+    Negative angle = person to the left  -> lower servo  (towards 45)
+    90 = centred
+    """
+    clamped = max(min(angle_deg, 45.0), -45.0)
+    raw = 90.0 + clamped
+    snapped = round(raw / 5.0) * 5
+    return max(45, min(135, snapped))
+
+
+def get_rear_servo(angle_deg, feet_detected: bool) -> int:
+    """
+    Returns the rear servo value (45-135 in 5° increments).
+    - If feet are detected: compute from angle and update last-seen timestamp.
+    - If no feet: hold last position. After REAR_NO_FEET_HOLD_SEC seconds,
+      reset to 90° (centre).
+    """
+    global _rear_servo_state
+    now = time.time()
+
+    if feet_detected:
+        servo = rear_angle_to_servo(angle_deg if angle_deg is not None else 0.0)
+        _rear_servo_state['servo'] = servo
+        _rear_servo_state['last_seen'] = now
+        return servo
+    else:
+        # No feet — hold last position until timeout, then centre
+        if (now - _rear_servo_state['last_seen']) >= REAR_NO_FEET_HOLD_SEC:
+            _rear_servo_state['servo'] = 90
+        return _rear_servo_state['servo']
+
+
+def send_angles_to_pi(angle_front, rear_servo=90):
     global pi_started
     # On the very first angle of a run, send START to Pi first so it is ready to move.
     # Guard with is_running to avoid a race where STOP arrives mid-loop.
@@ -403,10 +547,14 @@ def send_angle_to_pi(angle_front, angle_rear):
         print('[PI CMD] First angle computed — sending START to Pi now')
         forward_command_to_pi('START')
         pi_started = True
-    # Sends plain-text steering to Pi (no JSON)
-    body = f"ANGLE_FRONT={angle_front:.2f}, ANGLE_REAR={angle_rear:.2f}\n"
+
+    front_servo = angle_deg_to_servo_held(angle_front)
+    if front_servo is None:
+        return  # Angle hasn't been stable for STEER_HOLD_SEC yet — skip update
+
+    body = f"FRONT_ANGLE={front_servo},REAR_ANGLE={rear_servo}"
     for pi_ip in PI_IPS:
-        print(f"[PI STEER] {body} -> {pi_ip}:{PI_CMD_PORT}")
+        print(f"[PI STEER] {body} (front={angle_front:.2f}°, rear_servo={rear_servo}) -> {pi_ip}:{PI_CMD_PORT}")
         tx_socket.sendto(body.encode('utf-8'), (pi_ip, PI_CMD_PORT))
 
 
@@ -564,10 +712,11 @@ def main():
     print("[SERVER] 🖥️ Displaying video feeds. Press 'q' to quit.")
 
     while True:
-        front = latest_front_frame
-        rear = latest_rear_frame
+        now_ts = time.time()
+        front = latest_front_frame if (front_frame_ts > 0 and (now_ts - front_frame_ts) <= FRAME_MAX_AGE_SEC) else None
+        rear  = latest_rear_frame  if (rear_frame_ts  > 0 and (now_ts - rear_frame_ts)  <= FRAME_MAX_AGE_SEC) else None
         front_display = front_placeholder.copy() if front is None else front.copy()
-        rear_display = rear_placeholder.copy() if rear is None else rear.copy()
+        rear_display  = rear_placeholder.copy()  if rear  is None else rear.copy()
 
         # --- CV warmup: run one inference as soon as first frame arrives ---
         if not cv_ready and front is not None:
@@ -582,11 +731,13 @@ def main():
             except Exception as e:
                 print(f'[CV] ⚠️  Warmup inference failed: {e}')
 
+        # Initialise per-frame condition lists (also used by auto-resume check in else block)
+        front_stop_conditions = []
+        rear_stop_conditions  = []
+
         if is_running:
             latest_angle_deg = 0.0
-            angle_rear = 0.0
-            front_stop_conditions = []
-            rear_stop_conditions = []
+            rear_servo_val = 90
 
             if front is not None:
                 frame_idx += 1
@@ -633,10 +784,11 @@ def main():
                     robot_status = 'LARGE_ANGLE'
                     front_stop_conditions.append('Corner Angle too extreme')
 
+                servo_val = angle_deg_to_servo(latest_angle_deg)
                 with state_lock:
                     latest_state['front'] = {
                         'robot_status': robot_status,
-                        'ANGLE': f'ANGLE={latest_angle_deg:.2f}',
+                        'FRONT_ANGLE': f'FRONT_ANGLE={servo_val}',
                         'object_detection': front_detection_output,
                         'stop_conditions': front_stop_conditions,
                     }
@@ -670,6 +822,9 @@ def main():
                 angle_rear = calculate_angle_to_center(midpoint, vis_rear)
                 visualize_angle(vis_rear, angle_rear)
 
+                feet_detected = midpoint is not None
+                rear_servo_val = get_rear_servo(angle_rear, feet_detected)
+
                 rear_status, _, _ = feet_status(left_ankle, right_ankle, lanes_xy_rear)
                 rear_detection_output = build_rear_detection(rear_status)
                 if rear_status == 'Left out':
@@ -687,6 +842,7 @@ def main():
                 with state_lock:
                     latest_state['rear'] = {
                         'status': rear_status,
+                        'REAR_ANGLE': f'REAR_ANGLE={rear_servo_val}',
                         'object_detection': rear_detection_output,
                         'stop_conditions': rear_stop_conditions,
                     }
@@ -745,19 +901,21 @@ def main():
                 if (now - last_auto_stop_send_ts) >= AUTO_STOP_COOLDOWN_SEC:
                     print(f"[AUTO-STOP] Hard stop triggered: {actuator_stop_conditions}")
                     forward_command_to_pi('STOP')
+                    reset_steering_to_default()
                     last_auto_stop_send_ts = now
                     with state_lock:
                         latest_state['auto_stop_reason'] = actuator_stop_conditions
                         latest_state['running'] = False
                     is_running = False
                     pi_started = False
+                    auto_stop_ts = time.time()
                     broadcast_status(force=True)
                     with state_lock:
                         latest_state['auto_stop_reason'] = []
 
             # Always send steering updates; Arduino/Pi can decide what to do while STOP is active.
             if is_running:
-                send_angle_to_pi(latest_angle_deg, angle_rear)
+                send_angles_to_pi(latest_angle_deg, rear_servo_val)
 
             # Push state at steady cadence while running (even if one stream is delayed)
             with state_lock:
@@ -772,9 +930,20 @@ def main():
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
         else:
+            # Idle / auto-stopped: check for auto-resume if enabled
+            if AUTO_RESUME_SEC > 0 and auto_stop_ts > 0:
+                if (time.time() - auto_stop_ts) >= AUTO_RESUME_SEC:
+                    print(f'[AUTO-RESUME] {AUTO_RESUME_SEC}s elapsed since auto-stop — resuming')
+                    is_running = True
+                    pi_started = False
+                    condition_since = {}
+                    auto_stop_ts = 0.0
+                    with state_lock:
+                        latest_state['running'] = True
+                    broadcast_status(force=True)
             # Idle preview mode: keep showing raw feeds on laptop even before START
             cv2.putText(front_display, 'MODE: IDLE (RAW)', (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
-            cv2.putText(rear_display, 'MODE: IDLE (RAW)', (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+            cv2.putText(rear_display,  'MODE: IDLE (RAW)', (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
             cv2.imshow("Front AI Camera", front_display)
             cv2.imshow("Rear Backup Camera", rear_display)
 
