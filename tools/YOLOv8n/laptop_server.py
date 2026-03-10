@@ -30,7 +30,7 @@ FRONT_PORT = 8000
 REAR_PORT = 8002
 MAX_DGRAM = 65507
 
-PI_IPS = ["192.168.8.199", "172.17.0.1"]
+PI_IPS = ["192.168.118.199"]
 PI_CMD_PORT = 8001
 
 DEFAULT_CONFIG = 'configs/clrnet/clr_resnet18_tusimple.py'
@@ -43,6 +43,11 @@ DEFAULT_REAR_POSE = 'checkpoints/yolov8n-pose_int8.tflite'
 latest_rear_frame = None
 latest_front_frame = None
 is_running = False
+cv_ready = False
+cv_ready_event = threading.Event()
+pi_started = False
+condition_since = {}   # { 'front:<cond>' | 'rear:<cond>' : first_seen_timestamp }
+last_auto_stop_send_ts = 0.0
 
 tx_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 app = Flask(__name__)
@@ -55,8 +60,23 @@ last_ws_push_ts = 0.0
 WS_PUSH_HZ = 5.0
 AUTO_STOP_COOLDOWN_SEC = 1.0
 
+# --- STOP CONDITION HOLD TIMES (seconds) ---
+# How long a condition must be continuously active before STOP is sent to Pi.
+# Raise for more leniency, lower for faster response.
+HOLD_OBJECT_IN_LANE_SEC    = 10.0   # Front: YOLO object inside lane
+HOLD_CORNER_ANGLE_SEC      = 6.0   # Front: heading angle >= 70 degrees
+HOLD_FRONT_NO_LANE_SEC     = 8.0   # Front: CLRNet detects 0 lanes
+HOLD_FRONT_OUT_LANE_SEC    = 8.0   # Front: robot out of lane
+HOLD_LEFT_FOOT_SEC         = 10.0   # Rear: left ankle outside lane
+HOLD_RIGHT_FOOT_SEC        = 10.0   # Rear: right ankle outside lane
+HOLD_BOTH_FEET_SEC         = 10.0   # Rear: both ankles outside lane
+HOLD_NO_FEET_SEC           = 15.0   # Rear: no ankles detected at all
+HOLD_REAR_NO_LANE_SEC      = 8.0   # Rear: CLRNet detects 0 lanes
+HOLD_REAR_OUT_LANE_SEC     = 8.0   # Rear: robot out of lane
+
 latest_state = {
     'running': False,
+    'auto_stop_reason': [],
     'front': {
         'robot_status': 'NORMAL',
         'ANGLE': 'ANGLE=0.00',
@@ -213,6 +233,8 @@ def build_rear_detection(status):
 def build_status_payload():
     return {
         'running': latest_state.get('running', False),
+        'cv_ready': cv_ready,
+        'auto_stop_reason': latest_state.get('auto_stop_reason', []),
         'front': {
             'robot_status': latest_state.get('front', {}).get('robot_status', 'NORMAL'),
             'ANGLE': latest_state.get('front', {}).get('ANGLE', 'ANGLE=0.00'),
@@ -264,15 +286,28 @@ def forward_command_to_pi(command):
 def receive_command():
     global is_running
     command = (request.json or {}).get('action', '').strip().upper()
-    
-    if command in ["START", "STOP"]:
-        is_running = (command == "START")
-        print(f"📱 APP SAYS {command}: Forwarding to Pi...")
-        forward_command_to_pi(command)
+
+    if command == 'START':
+        global pi_started, condition_since, last_auto_stop_send_ts
+        is_running = True
+        pi_started = False          # Reset so Pi gets START on first angle of this new run
+        condition_since = {}        # Clear all hold timers from previous run
+        last_auto_stop_send_ts = 0.0  # Reset cooldown so first stop of new run fires immediately
+        print('📱 APP SAYS START: CV started locally — Pi will be notified on first angle')
         with state_lock:
-            latest_state['running'] = is_running
+            latest_state['running'] = True
         broadcast_status(force=True)
-        return jsonify({"status": "success", "running": is_running}), 200
+        return jsonify({'status': 'success', 'running': True}), 200
+
+    if command == 'STOP':
+        is_running = False
+        print('📱 APP SAYS STOP: Forwarding to Pi...')
+        forward_command_to_pi('STOP')
+        with state_lock:
+            latest_state['running'] = False
+        broadcast_status(force=True)
+        return jsonify({'status': 'success', 'running': False}), 200
+
     return jsonify({'status': 'error'}), 400
 
 
@@ -329,6 +364,15 @@ def receive_front_video():
             pass
 
 def send_angle_to_pi(angle_deg):
+    global pi_started
+    # On the very first angle of a run, send START to Pi first so it is ready to move.
+    # Guard with is_running to avoid a race where STOP arrives mid-loop.
+    if not pi_started:
+        if not is_running:
+            return
+        print('[PI CMD] First angle computed — sending START to Pi now')
+        forward_command_to_pi('START')
+        pi_started = True
     # Sends plain-text steering to Pi (no JSON)
     body = f"ANGLE={angle_deg:.2f}"
     for pi_ip in PI_IPS:
@@ -398,7 +442,7 @@ def draw_ankle_point(frame, pt, color, label):
 
 # --- MAIN THREAD: AI PROCESSING & DISPLAY ---
 def main():
-    global is_running
+    global is_running, cv_ready, condition_since, last_auto_stop_send_ts
     print('[LAPTOP] Loading AI Models... Please wait.')
     device = choose_device(DEFAULT_DEVICE)
     cfg = Config.fromfile(resolve_path(DEFAULT_CONFIG))
@@ -413,13 +457,26 @@ def main():
     rear_pose = YOLO(resolve_path(DEFAULT_REAR_POSE))
     print(f'[LAPTOP] Models loaded on {device}. Ready!')
 
+    # --- Synthetic warmup: force MPS kernel compilation before any real frame ---
+    # This means the first real inference will be fast, not slow.
+    print('[CV] Running synthetic warmup to compile MPS kernels...')
+    try:
+        dummy = torch.zeros(1, 3, cfg.img_h, cfg.img_w, device=device)
+        with torch.inference_mode():
+            out_dummy = lane_model({'img': dummy})
+            _ = lane_model.heads.get_lanes(out_dummy)[0]
+        print('[CV] ✅ Synthetic warmup complete — MPS kernels compiled')
+    except Exception as e:
+        print(f'[CV] ⚠️  Synthetic warmup failed (non-fatal): {e}')
+
     threading.Thread(target=run_tcp_server, daemon=True).start()
     threading.Thread(target=receive_rear_video, daemon=True).start()
     threading.Thread(target=receive_front_video, daemon=True).start()
 
+    print('[CV] Waiting for first real front frame to confirm CV readiness...')
+
     frame_idx = 0
     cached_front_objects = []
-    last_auto_stop_send_ts = 0.0
     front_placeholder = make_placeholder_frame('Front AI Camera')
     rear_placeholder = make_placeholder_frame('Rear Backup Camera')
 
@@ -430,6 +487,19 @@ def main():
         rear = latest_rear_frame
         front_display = front_placeholder.copy() if front is None else front.copy()
         rear_display = rear_placeholder.copy() if rear is None else rear.copy()
+
+        # --- CV warmup: run one inference as soon as first frame arrives ---
+        if not cv_ready and front is not None:
+            try:
+                _, t_warmup = preprocess_frame(front, cfg, device)
+                with torch.inference_mode():
+                    out_w = lane_model({'img': t_warmup})
+                    _ = lane_model.heads.get_lanes(out_w)[0]
+                cv_ready = True
+                cv_ready_event.set()
+                print('[CV] ✅ CV is ready — robot can now be started from the app')
+            except Exception as e:
+                print(f'[CV] ⚠️  Warmup inference failed: {e}')
 
         if is_running:
             latest_angle_deg = 0.0
@@ -525,29 +595,72 @@ def main():
 
             combined_stop_conditions = front_stop_conditions + rear_stop_conditions
 
-            # Keep diagnostics for app, but only use hard hazards to command STOP to Pi.
-            hard_stop_set = {
-                'If object is in lane',
-                'Corner Angle too extreme',
-                'Left foot out',
-                'Right foot out',
-                'Both feet out',
+            # --- Per-condition hold-time evaluation ---
+            # A condition must be continuously active for its hold duration before STOP fires.
+            FRONT_HOLD = {
+                'If object is in lane':     HOLD_OBJECT_IN_LANE_SEC,
+                'Corner Angle too extreme': HOLD_CORNER_ANGLE_SEC,
+                'No lane Detected':         HOLD_FRONT_NO_LANE_SEC,
+                'Robot out of lane':        HOLD_FRONT_OUT_LANE_SEC,
             }
-            actuator_stop_conditions = [c for c in combined_stop_conditions if c in hard_stop_set]
+            REAR_HOLD = {
+                'Left foot out':     HOLD_LEFT_FOOT_SEC,
+                'Right foot out':    HOLD_RIGHT_FOOT_SEC,
+                'Both feet out':     HOLD_BOTH_FEET_SEC,
+                'No feet detected':  HOLD_NO_FEET_SEC,
+                'No lane Detected':  HOLD_REAR_NO_LANE_SEC,
+                'Robot out of lane': HOLD_REAR_OUT_LANE_SEC,
+            }
+
+            now = time.time()
+            actuator_stop_conditions = []
+            active_keys = set()
+
+            for c, hold in FRONT_HOLD.items():
+                if c in front_stop_conditions:
+                    key = f'front:{c}'
+                    active_keys.add(key)
+                    if key not in condition_since:
+                        condition_since[key] = now
+                    elif (now - condition_since[key]) >= hold:
+                        actuator_stop_conditions.append(c)
+
+            for c, hold in REAR_HOLD.items():
+                if c in rear_stop_conditions:
+                    key = f'rear:{c}'
+                    active_keys.add(key)
+                    if key not in condition_since:
+                        condition_since[key] = now
+                    elif (now - condition_since[key]) >= hold:
+                        actuator_stop_conditions.append(f'Rear: {c}')
+
+            # Clear timers for conditions no longer active this frame
+            for key in list(condition_since.keys()):
+                if key not in active_keys:
+                    del condition_since[key]
 
             if len(actuator_stop_conditions) > 0:
                 now = time.time()
                 if (now - last_auto_stop_send_ts) >= AUTO_STOP_COOLDOWN_SEC:
-                    print(f"[AUTO-STOP] CV stop condition active (keeping CV running): {actuator_stop_conditions}")
+                    print(f"[AUTO-STOP] Hard stop triggered: {actuator_stop_conditions}")
                     forward_command_to_pi('STOP')
                     last_auto_stop_send_ts = now
+                    with state_lock:
+                        latest_state['auto_stop_reason'] = actuator_stop_conditions
+                        latest_state['running'] = False
+                    is_running = False
+                    pi_started = False
+                    broadcast_status(force=True)
+                    with state_lock:
+                        latest_state['auto_stop_reason'] = []
 
             # Always send steering updates; Arduino/Pi can decide what to do while STOP is active.
-            send_angle_to_pi(latest_angle_deg)
+            if is_running:
+                send_angle_to_pi(latest_angle_deg)
 
             # Push state at steady cadence while running (even if one stream is delayed)
             with state_lock:
-                latest_state['running'] = True
+                latest_state['running'] = is_running
             broadcast_status(force=False)
 
             cv2.putText(front_display, 'MODE: RUNNING CV', (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)

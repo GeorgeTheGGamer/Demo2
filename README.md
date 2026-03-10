@@ -18,7 +18,7 @@ This project uses:
 - App control via REST (`START` / `STOP`)
 - Live status updates via WebSocket and `/status` endpoint
 - UDP command forwarding to Pi and serial forwarding to Arduino
-
+**
 ---
 
 ## Repository Structure
