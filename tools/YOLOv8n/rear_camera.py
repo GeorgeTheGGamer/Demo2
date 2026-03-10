@@ -15,6 +15,7 @@ import importlib
 from clrnet.models.registry import build_net
 from clrnet.utils.config import Config
 import poseDetector as pD
+from tools.helper.lane_fixer import LaneFixer
 
 
 # -----------------------------
@@ -23,7 +24,7 @@ import poseDetector as pD
 DEFAULT_CONFIG = 'configs/clrnet/clr_resnet18_tusimple.py'
 DEFAULT_CHECKPOINT = 'checkpoints/tusimple_r18.pth'
 DEFAULT_SOURCE = '0'
-DEFAULT_DEVICE = 'mps'  # 'auto' | 'cuda' | 'mps' | 'cpu'
+DEFAULT_DEVICE = 'auto'  # 'auto' | 'cuda' | 'mps' | 'cpu'
 DEFAULT_POSE_MODEL = 'checkpoints/yolov8n-pose_int8.tflite'
 LOG_INTERVAL_SECONDS = 5.0
 FOOT_OUT_STOP_SECONDS = 3.0
@@ -277,6 +278,52 @@ def open_source(source):
         raise RuntimeError(f'Unable to open source: {source}')
     return cap
 
+#TODO: added two helpers for angle calculation
+def calculate_midpoint(left_ankle, right_ankle):
+    """
+    Calculate the midpoint between left and right ankles.
+    :return: midpoint coordinate [x, y] or None if either ankle is None
+    """
+    if left_ankle is None or right_ankle is None:
+        return None
+
+    x_mid = (left_ankle[0] + right_ankle[0]) / 2
+    y_mid = (left_ankle[1] + right_ankle[1]) / 2
+
+    return [x_mid, y_mid]
+
+def calculate_angle_to_center(midpoint, frame):
+    frame_height, frame_width = frame.shape[:2]
+    if midpoint is None:
+        return None
+
+    # Vector from midpoint to top-center (frame_width/2, 0)
+    center_x = frame_width / 2
+    dx = midpoint[0] - center_x
+    dy = 0 - midpoint[1]
+    angle_x = np.degrees(np.arctan2(dx, -dy))
+
+    return angle_x
+
+def visualize_angle(frame, angle):
+    if angle is None:
+        return
+    h, w = frame.shape[:2]
+    center_x = w // 2
+    center_y = h - 50
+    length = 100
+    end_x = int(center_x + length * np.sin(np.radians(angle)))
+    end_y = int(center_y - length * np.cos(np.radians(angle)))
+    cv2.arrowedLine(frame, (center_x, center_y), (end_x, end_y), (255, 0, 255), 3)
+    cv2.putText(frame,
+                f'Angle: {angle:.1f} deg',
+                (center_x - 60, center_y - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 0, 255),
+                2,
+                cv2.LINE_AA)
+
 
 def main():
     args = parse_args()
@@ -326,6 +373,8 @@ def main():
     lane_missing_since_ts = None
     foot_monitor_armed = False
     prev = time.time()
+    # TODO: added lane fixer initialization for rear camera
+    lane_fixer = LaneFixer()
     while True:
         ok, frame = cap.read()
         if not ok:
@@ -340,6 +389,8 @@ def main():
             lanes = model.heads.get_lanes(output)[0]
 
         lanes_xy = extract_lane_xy(lanes, cfg, vis_frame.shape)
+        # TODO: added lane fixing step to handle temporary lane detection loss
+        lanes_xy = lane_fixer.fix(lanes_xy, vis_frame.shape[1])
         draw_lanes(vis_frame, lanes, cfg, line_width=args.line_width)
 
         lane_missing_now = (lanes_xy is None or len(lanes_xy) == 0)
@@ -360,6 +411,14 @@ def main():
             right_color = (0, 255, 0) if right_in else (0, 0, 255)
             draw_foot(vis_frame, normalize_point(left_ankle), left_color, 'L')
             draw_foot(vis_frame, normalize_point(right_ankle), right_color, 'R')
+
+            #TODO: added midpoint visualization and angle calculation
+            # Get the midpoint between the left and right ankles and draw it
+            midpoint = calculate_midpoint(left_ankle, right_ankle)
+            draw_foot(vis_frame, normalize_point(midpoint), left_color, 'M')
+            # Get the angle for lidar
+            angle = calculate_angle_to_center(midpoint, vis_frame)
+            visualize_angle(vis_frame, angle)
 
             cv2.putText(vis_frame,
                         status,

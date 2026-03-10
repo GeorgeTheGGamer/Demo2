@@ -19,6 +19,7 @@ from clrnet.utils.config import Config
 from tools.helper.steering_helper import SteeringHelper
 from tools.helper.hough_lane_detect import LaneDetector
 import tools.YOLOv8n.objectDetector as oD
+from tools.helper.lane_fixer import LaneFixer
 
 # -----------------------------
 # Local run defaults (edit here)
@@ -557,6 +558,9 @@ class FrontCamera:
             lanes = self.model.heads.get_lanes(output)[0]
         self.extract_lane_xy(lanes)
 
+        #TODO: added lane fixer
+        self.lanes_xy = self.fixer.fix(self.lanes_xy, self.frame.shape[1], n_samples=20)
+
         # Check if robot is out of lane based on lane points, update robot status accordingly
         out_of_lane_now = self.check_out_of_lane(self.lanes_xy)
         self.robot_stat = RobotStatus.OUT_OF_LANE if out_of_lane_now else RobotStatus.NORMAL
@@ -636,6 +640,9 @@ class FrontCamera:
         # Open video source
         self.open_source()
         self.ini_writer()
+
+        #TODO: added lane fixer initialization
+        self.fixer = LaneFixer()
 
         # Start capturing
         while True:
