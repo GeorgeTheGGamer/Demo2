@@ -107,29 +107,14 @@ def preprocess_frame(frame, cfg, device):
     return frame, tensor
 
 
-def draw_lanes(frame, lanes, cfg, line_width=4):
+def draw_lanes(frame, lanes_xy, line_width=4):
     colors = [
-        (255, 0, 0),
-        (0, 255, 0),
-        (0, 0, 255),
-        (255, 255, 0),
-        (255, 0, 255),
-        (0, 255, 255),
+        (255, 0, 0), (0, 255, 0), (0, 0, 255),
+        (255, 255, 0), (255, 0, 255), (0, 255, 255),
     ]
-
-    lanes_xy = []
-    for lane in lanes:
-        pts = lane.to_array(cfg)
-        xy = []
-        for p in pts:
-            x, y = int(round(p[0])), int(round(p[1]))
-            if 0 <= x < frame.shape[1] and 0 <= y < frame.shape[0]:
-                xy.append((x, y))
-        if len(xy) >= 2:
-            lanes_xy.append(xy)
-
-    lanes_xy.sort(key=lambda xys: xys[0][0])
     for i, xy in enumerate(lanes_xy):
+        if len(xy) < 2:
+            continue
         color = colors[i % len(colors)]
         for j in range(1, len(xy)):
             cv2.line(frame, xy[j - 1], xy[j], color, thickness=line_width)
@@ -391,7 +376,7 @@ def main():
         lanes_xy = extract_lane_xy(lanes, cfg, vis_frame.shape)
         # TODO: added lane fixing step to handle temporary lane detection loss
         lanes_xy = lane_fixer.fix(lanes_xy, vis_frame.shape[1])
-        draw_lanes(vis_frame, lanes, cfg, line_width=args.line_width)
+        draw_lanes(vis_frame, lanes_xy)
 
         lane_missing_now = (lanes_xy is None or len(lanes_xy) == 0)
         if lane_missing_now:
