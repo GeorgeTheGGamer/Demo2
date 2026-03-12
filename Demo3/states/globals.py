@@ -4,7 +4,7 @@ import threading
 import socket
 import time
 from collections import deque
-from flask import Flask, request, jsonify
+from flask import Flask
 from flask_sock import Sock
 
 from Demo3.config.configs import *  # Import all config parameters

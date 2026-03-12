@@ -1,16 +1,17 @@
 import importlib
+import threading
 
 
 from clrnet.utils.config import Config
 from clrnet.models.registry import build_net
-from config.bootstrap import *
-from vision.helpers.YOLO_helpers import *
-from vision.helpers.lane_helpers import *
-from vision.frame_processor import *
-from vision.helpers.lane_fixer import LaneFixer
-from vision.helpers.steering_helper import SteeringHelper, angle_deg_to_servo, calculate_angle_to_center, get_rear_servo
-from vision.helpers.focus_helper import FocusHelper
-from connection.commands import *
+from Demo3.config.bootstrap import *
+from Demo3.vision.helpers.YOLO_helpers import *
+from Demo3.vision.helpers.lane_helpers import *
+from Demo3.vision.frame_processor import *
+from Demo3.vision.helpers.lane_fixer import LaneFixer
+from Demo3.vision.helpers.steering_helper import SteeringHelper, angle_deg_to_servo, get_rear_servo, calculate_angle_to_center
+from Demo3.vision.helpers.focus_helper import FocusHelper
+from Demo3.connection.commands import *
 
 def main():
 
@@ -31,7 +32,6 @@ def main():
     print(f'[LAPTOP] Models loaded on {device}. Ready!')
 
     # --- 2. Synthetic Warmup: force MPS kernel compilation before any real frame ---
-    # This means the first real inference will be fast, not slow.
     print('[CV] Running synthetic warmup to compile MPS kernels...')
     try:
         dummy = torch.zeros(1, 3, cfg.img_h, cfg.img_w, device=device)
@@ -58,20 +58,20 @@ def main():
     while True:
         # --- 5. Frame Acquisition ---
         now_ts = time.time()
-        front = latest_front_frame if (front_frame_ts > 0 and (now_ts - front_frame_ts) <= FRAME_MAX_AGE_SEC) else None
-        rear = latest_rear_frame if (rear_frame_ts > 0 and (now_ts - rear_frame_ts) <= FRAME_MAX_AGE_SEC) else None
+        front = g.latest_front_frame if (g.front_frame_ts > 0 and (now_ts - g.front_frame_ts) <= FRAME_MAX_AGE_SEC) else None
+        rear  = g.latest_rear_frame  if (g.rear_frame_ts  > 0 and (now_ts - g.rear_frame_ts)  <= FRAME_MAX_AGE_SEC) else None
         front_display = front_placeholder.copy() if front is None else front.copy()
-        rear_display = rear_placeholder.copy() if rear is None else rear.copy()
+        rear_display  = rear_placeholder.copy()  if rear  is None else rear.copy()
 
         # --- 6. CV Warmup Check: run one inference as soon as first frame arrives ---
-        if not cv_ready and front is not None:
+        if not g.cv_ready and front is not None:
             try:
                 _, t_warmup = preprocess_frame(front, cfg, device)
                 with torch.inference_mode():
                     out_w = lane_model({'img': t_warmup})
                     _ = lane_model.heads.get_lanes(out_w)[0]
-                cv_ready = True
-                cv_ready_event.set()
+                g.cv_ready = True
+                g.cv_ready_event.set()
                 print('[CV] ✅ CV is ready — robot can now be started from the app')
             except Exception as e:
                 print(f'[CV] ⚠️  Warmup inference failed: {e}')
@@ -80,7 +80,7 @@ def main():
         front_stop_conditions = []
         rear_stop_conditions = []
 
-        if is_running:
+        if g.is_running:
             latest_angle_deg = 0.0
             rear_servo_val = 90
 
@@ -126,13 +126,10 @@ def main():
 
                 # 8e. Steering angle calculation
                 steer_helper = None
-                # If current state is STRAIGHT, set threshold to STRAIGHT_THRESHOLD to make robot go straight.
-                if state == 'STRAIGHT':
+                if g.state == 'STRAIGHT':
                     steer_helper = SteeringHelper(lanes_xy_front, vis_front.shape[:2], n_samples=20,
                                                   threshold=STRAIGHT_THRESHOLD)
-
-                # If current state is LEFT or RIGHT, use the normal STEER_THRESHOLD to allow sharper turns.
-                if state == 'LEFT' or state == 'RIGHT':
+                if g.state == 'LEFT' or g.state == 'RIGHT':
                     steer_helper = SteeringHelper(lanes_xy_front, vis_front.shape[:2], n_samples=20,
                                                   threshold=STEER_THRESHOLD)
 
@@ -147,8 +144,8 @@ def main():
 
                 # 8f. Update front state
                 servo_val = angle_deg_to_servo(latest_angle_deg)
-                with state_lock:
-                    latest_state['front'] = {
+                with g.state_lock:
+                    g.latest_state['front'] = {
                         'robot_status': robot_status,
                         'FRONT_ANGLE': f'FRONT_ANGLE={servo_val}',
                         'object_detection': front_detection_output,
@@ -180,7 +177,6 @@ def main():
                 draw_ankle_point(vis_rear, right_ankle, (255, 0, 255), 'R ankle')
 
                 # 9d. Rear angle calculation
-                # Calculate midpoint and angle to center for rear display and potential future use
                 midpoint = calculate_midpoint(left_ankle, right_ankle)
                 draw_ankle_point(vis_rear, normalize_point(midpoint), (255, 255, 0), 'M')
                 angle_rear = calculate_angle_to_center(midpoint, vis_rear)
@@ -205,8 +201,8 @@ def main():
                     rear_stop_conditions.append('Robot out of lane')
 
                 # 9f. Update rear state
-                with state_lock:
-                    latest_state['rear'] = {
+                with g.state_lock:
+                    g.latest_state['rear'] = {
                         'status': rear_status,
                         'REAR_ANGLE': f'REAR_ANGLE={rear_servo_val}',
                         'object_detection': rear_detection_output,
@@ -221,18 +217,18 @@ def main():
             # --- 10. Hold-Time Stop Condition Evaluation ---
             # A condition must be continuously active for its hold duration before STOP fires.
             FRONT_HOLD = {
-                'If object is in lane': HOLD_OBJECT_IN_LANE_SEC,
+                'If object is in lane':     HOLD_OBJECT_IN_LANE_SEC,
                 'Corner Angle too extreme': HOLD_CORNER_ANGLE_SEC,
-                'No lane Detected': HOLD_FRONT_NO_LANE_SEC,
-                'Robot out of lane': HOLD_FRONT_OUT_LANE_SEC,
+                'No lane Detected':         HOLD_FRONT_NO_LANE_SEC,
+                'Robot out of lane':        HOLD_FRONT_OUT_LANE_SEC,
             }
             REAR_HOLD = {
-                'Left foot out': HOLD_LEFT_FOOT_SEC,
-                'Right foot out': HOLD_RIGHT_FOOT_SEC,
-                'Both feet out': HOLD_BOTH_FEET_SEC,
+                'Left foot out':    HOLD_LEFT_FOOT_SEC,
+                'Right foot out':   HOLD_RIGHT_FOOT_SEC,
+                'Both feet out':    HOLD_BOTH_FEET_SEC,
                 'No feet detected': HOLD_NO_FEET_SEC,
                 'No lane Detected': HOLD_REAR_NO_LANE_SEC,
-                'Robot out of lane': HOLD_REAR_OUT_LANE_SEC,
+                'Robot out of lane':HOLD_REAR_OUT_LANE_SEC,
             }
 
             now = time.time()
@@ -243,66 +239,64 @@ def main():
                 if c in front_stop_conditions:
                     key = f'front:{c}'
                     active_keys.add(key)
-                    if key not in condition_since:
-                        condition_since[key] = now
-                    elif (now - condition_since[key]) >= hold:
+                    if key not in g.condition_since:
+                        g.condition_since[key] = now
+                    elif (now - g.condition_since[key]) >= hold:
                         actuator_stop_conditions.append(c)
 
             for c, hold in REAR_HOLD.items():
                 if c in rear_stop_conditions:
                     key = f'rear:{c}'
                     active_keys.add(key)
-                    if key not in condition_since:
-                        condition_since[key] = now
-                    elif (now - condition_since[key]) >= hold:
+                    if key not in g.condition_since:
+                        g.condition_since[key] = now
+                    elif (now - g.condition_since[key]) >= hold:
                         actuator_stop_conditions.append(f'Rear: {c}')
 
             # Clear timers for conditions no longer active this frame
-            for key in list(condition_since.keys()):
+            for key in list(g.condition_since.keys()):
                 if key not in active_keys:
-                    del condition_since[key]
+                    del g.condition_since[key]
 
             # --- 11. Auto-Stop Trigger ---
             # Fire hard stop if any condition has exceeded its hold time.
             if len(actuator_stop_conditions) > 0:
                 print(f"[AUTO-STOP] Hard stop triggered: {actuator_stop_conditions}")
                 forward_command_to_pi('STOP')
-                reset_steering_to_default()
-                full_state_reset()
-                with state_lock:
-                    latest_state['auto_stop_reason'] = actuator_stop_conditions
-                    latest_state['running'] = False
-                is_running = False
+                g.reset_steering_to_default()
+                g.full_state_reset()
+                with g.state_lock:
+                    g.latest_state['auto_stop_reason'] = actuator_stop_conditions
+                    g.latest_state['running'] = False
+                g.is_running = False
                 broadcast_status(force=True)
-                with state_lock:
-                    latest_state['auto_stop_reason'] = []
+                with g.state_lock:
+                    g.latest_state['auto_stop_reason'] = []
 
             # --- 12. Send Steering Commands ---
             # Forward angle commands to Pi only if still running after condition check.
-            # Always send steering updates; Arduino/Pi can decide what to do while STOP is active.
-            if is_running:
+            if g.is_running:
                 send_angles_to_pi(latest_angle_deg, rear_servo_val)
 
             # --- 13. Broadcast Status & Display ---
             # Push state update at steady cadence and render CV windows.
-            # Push state at steady cadence while running (even if one stream is delayed)
-            with state_lock:
-                latest_state['running'] = is_running
+            with g.state_lock:
+                g.latest_state['running'] = g.is_running
             broadcast_status(force=False)
 
             cv2.putText(front_display, 'MODE: RUNNING CV', (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-            cv2.putText(rear_display, 'MODE: RUNNING CV', (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+            cv2.putText(rear_display,  'MODE: RUNNING CV', (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
             cv2.imshow("Front AI Camera", front_display)
             cv2.imshow("Rear Backup Camera", rear_display)
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
+
         else:
             # --- 14. Idle Preview Mode ---
             # Show raw feeds on laptop before START command is received.
-            # Idle preview mode: keep showing raw feeds on laptop even before START
             cv2.putText(front_display, 'MODE: IDLE (RAW)', (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
-            cv2.putText(rear_display, 'MODE: IDLE (RAW)', (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+            cv2.putText(rear_display,  'MODE: IDLE (RAW)', (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
             cv2.imshow("Front AI Camera", front_display)
             cv2.imshow("Rear Backup Camera", rear_display)
 

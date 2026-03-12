@@ -1,8 +1,11 @@
 """Provides functions to fit lane lines and calculate the centerline
  for steering angle estimation."""
 import math
+import time
+
 import numpy as np
-import cv2
+import Demo3.states.globals as g
+from Demo3.config.configs import *
 
 MIN_POINTS = 3
 
@@ -206,23 +209,21 @@ def angle_deg_to_servo_held(angle_deg: float) -> int | None:
     This ensures only angles that reliably reflect the true lane direction are sent.
     Returns None until window is full or no consensus is reached.
     """
-    global _angle_window, _ema_angle
-
     # Stage 1: EMA smooth the raw angle
-    if _ema_angle is None:
-        _ema_angle = angle_deg  # seed on first frame
+    if g._ema_angle is None:
+        g._ema_angle = angle_deg  # seed on first frame
         return None
-    _ema_angle = STEER_EMA_ALPHA * angle_deg + (1.0 - STEER_EMA_ALPHA) * _ema_angle
+    g._ema_angle = STEER_EMA_ALPHA * angle_deg + (1.0 - STEER_EMA_ALPHA) * g._ema_angle
 
     # Stage 2: Map smoothed angle to servo, then majority-vote
-    candidate = angle_deg_to_servo(_ema_angle)
-    _angle_window.append(candidate)
+    candidate = angle_deg_to_servo(g._ema_angle)
+    g._angle_window.append(candidate)
 
-    if len(_angle_window) < STEER_VOTE_WINDOW:
+    if len(g._angle_window) < STEER_VOTE_WINDOW:
         return None  # window not yet full
 
-    majority = max(set(_angle_window), key=_angle_window.count)
-    if _angle_window.count(majority) >= STEER_VOTE_THRESHOLD:
+    majority = max(set(g._angle_window), key=g._angle_window.count)
+    if g._angle_window.count(majority) >= STEER_VOTE_THRESHOLD:
         return majority
 
     return None  # no consensus yet
@@ -247,19 +248,18 @@ def get_rear_servo(angle_deg, feet_detected: bool) -> int:
     - If no feet: hold last position. After REAR_NO_FEET_HOLD_SEC seconds,
       reset to 90° (centre).
     """
-    global _rear_servo_state
     now = time.time()
 
     if feet_detected:
         servo = rear_angle_to_servo(angle_deg if angle_deg is not None else 0.0)
-        _rear_servo_state['servo'] = servo
-        _rear_servo_state['last_seen'] = now
+        g._rear_servo_state['servo'] = servo
+        g._rear_servo_state['last_seen'] = now
         return servo
     else:
         # No feet — hold last position until timeout, then centre
-        if (now - _rear_servo_state['last_seen']) >= REAR_NO_FEET_HOLD_SEC:
-            _rear_servo_state['servo'] = 90
-        return _rear_servo_state['servo']
+        if (now - g._rear_servo_state['last_seen']) >= REAR_NO_FEET_HOLD_SEC:
+            g._rear_servo_state['servo'] = 90
+        return g._rear_servo_state['servo']
 
 def calculate_angle_to_center(midpoint, frame):
     frame_height, frame_width = frame.shape[:2]
