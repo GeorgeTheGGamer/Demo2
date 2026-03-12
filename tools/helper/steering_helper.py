@@ -8,11 +8,14 @@ MIN_POINTS = 3
 
 class SteeringHelper:
 
-    def __init__(self, lanes_xy, frame_width, n_samples=20, threshold=30):
+    #TODO: 1. remove threshold while in straight lines
+    #TODO: 2. add heading angle for steering
+    #TODO: 3. add lane angle and facing angle to keep car go straight in straight lane
+    def __init__(self, lanes_xy, frame_shape , n_samples=20, threshold=30):
         """
         lanes_xy   : list of N lanes, each lane is a list of (x, y) tuples, sorted left→right by x.
                      Can also be a 2-tuple (left_pts, right_pts) for backward compatibility.
-        frame_width: width of the frame in pixels, used to find the lane pair closest to center.
+        frame_shape: shapes of the frame in pixels, used to find the lane pair closest to center.
         The two lanes whose average-x straddles the frame center are selected as left/right boundary.
         self.worked is False when fewer than 2 valid lanes are found.
         """
@@ -46,7 +49,9 @@ class SteeringHelper:
             return
 
         # Pick the lane pair that straddles the frame center
-        cx = frame_width / 2.0
+        self.frame_width = frame_shape[1]
+        self.frame_height = frame_shape[0]
+        cx = self.frame_width / 2.0
 
         def mean_x(lane):
             return sum(p[0] for p in lane) / len(lane)
@@ -142,21 +147,25 @@ class SteeringHelper:
         if n < 2:
             return 0.0
 
-        # Use bottom point (near car) and top point (horizon) for max dy,
-        # avoiding near-zero dy that causes atan2 to spike toward ±90°.
-        x1, y1 = self.center_points[-1]
-        x2, y2 = self.center_points[0]
+        # New logic: use the center bottom point and the top point to calculate the heading angle.
+        x1, y1 = self.center_points[0] # top point (horizon)
+        x2, y2 = self.frame_width/2, self.frame_height # bottom point (representing car position)
 
-        dx = x2 - x1
-        dy = y2 - y1
+        dx = x1 - x2
+        dy = y1 - y2
 
-        theta = math.atan2(dx, -dy)
+        theta = math.atan2(-dx, -dy)
         theta_deg = math.degrees(theta)
 
-        if abs(theta_deg) <= self.threshold:
-            return 0.0
+        # Old angle to keep car go straight in straight lane
+        # TODO: only use it when on straight lane, otherwise it will cause wrong angle when lane is curved
+        x3, y3 = self.center_points[-1] # bottom point (car position)
+        dx2 = x3 - x2
+        dy2 = y3 - y2
+        theta2 = math.atan2(-dx2, -dy2)
+        theta2_deg = math.degrees(theta2)
 
-        return theta
+        return theta, theta2_deg if abs(theta_deg) > self.threshold else 0.0
 
     def visualization(self, frame):
         """
