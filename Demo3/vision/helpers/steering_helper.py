@@ -7,7 +7,6 @@ import cv2
 MIN_POINTS = 3
 
 class SteeringHelper:
-    #TODO: make helper available to handle both cameras
 
     def __init__(self, lanes_xy, frame_shape , n_samples=20, threshold=30):
         """
