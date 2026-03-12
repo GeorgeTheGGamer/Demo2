@@ -181,21 +181,6 @@ def extract_lane_xy(lanes, cfg, frame_shape):
             lanes_xy.append(xy)
     lanes_xy.sort(key=lambda xys: xys[0][0])
     return lanes_xy
-#
-# def draw_lanes(frame, lanes, cfg, line_width=4):
-#     lanes_xy = []
-#     h, w = frame.shape[:2]
-#     colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
-#     for i, lane in enumerate(lanes):
-#         pts = lane.to_array(cfg)
-#         xy = [(int(round(p[0])), int(round(p[1]))) for p in pts if 0 <= p[0] < w and 0 <= p[1] < h]
-#         if len(xy) >= 2:
-#             lanes_xy.append(xy)
-#             color = colors[i % len(colors)]
-#             for j in range(1, len(xy)):
-#                 cv2.line(frame, xy[j - 1], xy[j], color, thickness=line_width)
-#     return lanes_xy
-
 
 def interpolate_x_at_y(polyline, y):
     for i in range(1, len(polyline)):
@@ -347,21 +332,6 @@ def forward_command_to_pi(command):
         tx_socket.sendto(payload, (pi_ip, PI_CMD_PORT))
 
 
-def reset_steering_to_default():
-    """Send both servos back to 90° (straight) and clear steering hold-timer state."""
-    global _steer_candidate, _rear_servo_state, _angle_window, _ema_angle
-    _steer_candidate = {'servo': None, 'since': 0.0}
-    _rear_servo_state = {'servo': 90, 'last_seen': 0.0}
-    _angle_window.clear()
-    _ema_angle = None
-    body = "FRONT_ANGLE=90,REAR_ANGLE=90"
-    for _ in range(3):  # send 3 times to survive UDP packet drops
-        for pi_ip in PI_IPS:
-            print(f"[PI STEER] RESET -> {body} -> {pi_ip}:{PI_CMD_PORT}")
-            tx_socket.sendto(body.encode('utf-8'), (pi_ip, PI_CMD_PORT))
-        time.sleep(0.05)
-
-
 def full_state_reset():
     """
     Full reset of all runtime state. Called on STOP (manual or auto) so the
@@ -411,7 +381,6 @@ def receive_command():
         is_running = False
         print('📱 APP SAYS STOP: Forwarding to Pi...')
         forward_command_to_pi('STOP')
-        reset_steering_to_default()
         full_state_reset()
         with state_lock:
             latest_state['running'] = False
@@ -934,7 +903,6 @@ def main():
             if len(actuator_stop_conditions) > 0:
                 print(f"[AUTO-STOP] Hard stop triggered: {actuator_stop_conditions}")
                 forward_command_to_pi('STOP')
-                reset_steering_to_default()
                 full_state_reset()
                 with state_lock:
                     latest_state['auto_stop_reason'] = actuator_stop_conditions
