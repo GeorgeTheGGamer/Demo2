@@ -19,7 +19,7 @@ PI_CMD_PORT = 8001
 
 DEFAULT_CONFIG = 'configs/clrnet/clr_resnet18_tusimple.py'
 DEFAULT_CHECKPOINT = 'checkpoints/tusimple_r18.pth'
-DEFAULT_DEVICE = 'mps' # Change to 'cuda' or 'cpu' as needed
+DEFAULT_DEVICE = 'cpu' # Change to 'cuda' or 'cpu' as needed
 DEFAULT_FRONT_YOLO = 'checkpoints/yolov8n_int8.tflite'
 DEFAULT_REAR_POSE = 'checkpoints/yolov8n-pose_int8.tflite'
 MINMAX_ANGLE = 30.0  # Max heading angle in degrees for servo mapping
