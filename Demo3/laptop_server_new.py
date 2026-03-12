@@ -1,7 +1,15 @@
 import importlib
 import threading
 
-
+import Demo3.states.globals as g
+from Demo3.connection.commands import (
+    run_tcp_server,
+    receive_rear_video,
+    receive_front_video,
+    send_angles_to_pi,
+    forward_command_to_pi,
+    broadcast_status,
+)
 from clrnet.utils.config import Config
 from clrnet.models.registry import build_net
 from Demo3.config.bootstrap import *
@@ -11,7 +19,6 @@ from Demo3.vision.frame_processor import *
 from Demo3.vision.helpers.lane_fixer import LaneFixer
 from Demo3.vision.helpers.steering_helper import SteeringHelper, angle_deg_to_servo, get_rear_servo, calculate_angle_to_center
 from Demo3.vision.helpers.focus_helper import FocusHelper
-from Demo3.connection.commands import *
 
 def main():
 

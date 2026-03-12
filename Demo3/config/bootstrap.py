@@ -1,7 +1,7 @@
 """Helpers to read path and initialize models"""
 
 import torch
-from configs import *
+from Demo3.config.configs import *
 
 # --- HELPER FUNCTIONS ---
 def resolve_path(path):

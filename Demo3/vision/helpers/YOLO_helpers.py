@@ -1,5 +1,5 @@
 """YOLO related helper functions for detecting ankles and other objects in frames, and determining feet status."""
-from lane_helpers import *
+from Demo3.vision.helpers.lane_helpers import *
 
 def get_ankle(frame, model):
     """
