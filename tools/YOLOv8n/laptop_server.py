@@ -51,7 +51,6 @@ cv_ready = False
 cv_ready_event = threading.Event()
 pi_started = False
 condition_since = {}   # { 'front:<cond>' | 'rear:<cond>' : first_seen_timestamp }
-last_auto_stop_send_ts = 0.0
 
 # Steering hold state: tracks the current candidate servo value and when it was first seen
 _steer_candidate = {'servo': None, 'since': 0.0}
@@ -63,9 +62,6 @@ _rear_servo_state = {'servo': 90, 'last_seen': 0.0}
 front_frame_ts = 0.0
 rear_frame_ts  = 0.0
 
-# Timestamp of the most recent auto-stop (used for auto-resume)
-auto_stop_ts = 0.0
-
 tx_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 app = Flask(__name__)
 sock = Sock(app)
@@ -75,7 +71,6 @@ ws_lock = threading.Lock()
 ws_clients = set()
 last_ws_push_ts = 0.0
 WS_PUSH_HZ = 5.0
-AUTO_STOP_COOLDOWN_SEC = 1.0
 
 # --- STOP CONDITION HOLD TIMES (seconds) ---
 # How long a condition must be continuously active before STOP is sent to Pi.
@@ -104,16 +99,16 @@ FRAME_MAX_AGE_SEC = 6.0
 
 # Majority-vote steering: number of recent frames to consider and minimum
 # agreement count required before a new servo value is committed.
-# E.g. window=10, threshold=7 means 7/10 frames must agree.
-STEER_VOTE_WINDOW    = 10   # rolling window size
-STEER_VOTE_THRESHOLD = 7    # minimum votes needed (out of STEER_VOTE_WINDOW)
-
-# Auto-resume after auto-STOP: seconds after which the system automatically
-# restarts if all stop conditions have cleared. Set to 0 to disable.
-AUTO_RESUME_SEC = 5.0
+# EMA smooths the raw angle first, then majority-vote confirms direction.
+# E.g. window=5, threshold=3 means 3/5 EMA-smoothed frames must agree.
+STEER_VOTE_WINDOW    = 5    # rolling window size (reduced for low-FPS responsiveness)
+STEER_VOTE_THRESHOLD = 3    # minimum votes needed (out of STEER_VOTE_WINDOW)
+STEER_EMA_ALPHA      = 0.4  # EMA smoothing factor: 0=no update, 1=no smoothing. Tune during testing.
 
 # Rolling window of recent servo candidates for majority-vote steering
 _angle_window: deque = deque(maxlen=STEER_VOTE_WINDOW)
+# EMA state for raw angle smoothing (seeded on first frame)
+_ema_angle = None
 
 latest_state = {
     'running': False,
@@ -353,17 +348,47 @@ def forward_command_to_pi(command):
 
 
 def reset_steering_to_default():
-    """Send both servos back to 90° (straight) and clear all hold-timer state."""
-    global _steer_candidate, _rear_servo_state, _angle_window
+    """Send both servos back to 90° (straight) and clear steering hold-timer state."""
+    global _steer_candidate, _rear_servo_state, _angle_window, _ema_angle
     _steer_candidate = {'servo': None, 'since': 0.0}
     _rear_servo_state = {'servo': 90, 'last_seen': 0.0}
     _angle_window.clear()
+    _ema_angle = None
     body = "FRONT_ANGLE=90,REAR_ANGLE=90"
     for _ in range(3):  # send 3 times to survive UDP packet drops
         for pi_ip in PI_IPS:
             print(f"[PI STEER] RESET -> {body} -> {pi_ip}:{PI_CMD_PORT}")
             tx_socket.sendto(body.encode('utf-8'), (pi_ip, PI_CMD_PORT))
         time.sleep(0.05)
+
+
+def full_state_reset():
+    """
+    Full reset of all runtime state. Called on STOP (manual or auto) so the
+    next START is completely independent — no stale angles, conditions, or timers.
+    """
+    global _steer_candidate, _rear_servo_state, _angle_window, _ema_angle
+    global condition_since, latest_front_frame, latest_rear_frame
+    global front_frame_ts, rear_frame_ts, pi_started
+
+    # Steering
+    _steer_candidate  = {'servo': None, 'since': 0.0}
+    _rear_servo_state = {'servo': 90, 'last_seen': 0.0}
+    _angle_window.clear()
+    _ema_angle = None
+
+    # Stop condition hold timers
+    condition_since.clear()
+
+    # Drop stale frames so next run starts fresh
+    latest_front_frame = None
+    latest_rear_frame  = None
+    front_frame_ts     = 0.0
+    rear_frame_ts      = 0.0
+
+    # Pi handshake — force re-START on next run
+    pi_started = False
+
 
 # --- NETWORKING THREADS ---
 @app.route('/command', methods=['POST'])
@@ -372,11 +397,10 @@ def receive_command():
     command = (request.json or {}).get('action', '').strip().upper()
 
     if command == 'START':
-        global pi_started, condition_since, last_auto_stop_send_ts
+        global pi_started, condition_since
         is_running = True
-        pi_started = False          # Reset so Pi gets START on first angle of this new run
-        condition_since = {}        # Clear all hold timers from previous run
-        last_auto_stop_send_ts = 0.0  # Reset cooldown so first stop of new run fires immediately
+        pi_started = False
+        condition_since = {}
         print('📱 APP SAYS START: CV started locally — Pi will be notified on first angle')
         with state_lock:
             latest_state['running'] = True
@@ -388,6 +412,7 @@ def receive_command():
         print('📱 APP SAYS STOP: Forwarding to Pi...')
         forward_command_to_pi('STOP')
         reset_steering_to_default()
+        full_state_reset()
         with state_lock:
             latest_state['running'] = False
         broadcast_status(force=True)
@@ -454,41 +479,51 @@ def receive_front_video():
 
 def angle_deg_to_servo(angle_deg: float) -> int:
     """
-    Map heading angle (-45 to +45 degrees) to fixed servo constants (45-135).
-    Positive angle = turn right -> higher servo value (towards 135)
-    Negative angle = turn left  -> lower servo value  (towards 45)
+    Map heading angle (-45 to +45 degrees) to fixed servo constants (70-110).
+    Positive angle = turn right -> higher servo value (towards 110)
+    Negative angle = turn left  -> lower servo value  (towards 70)
     90 = straight ahead. Dead-band: ±10° to account for angle inaccuracy.
-    Fixed constants: 45, 55, 65, 80, 90, 100, 115, 125, 135
+    Fixed constants: 70, 75, 80, 85, 90, 95, 100, 105, 110 (5° increments)
     """
     a = angle_deg
     if a >= 38:
-        return 135      # Hard Right
+        return 110      # Hard Right
     elif a >= 28:
-        return 125      # Moderate Right
+        return 105      # Moderate Right
     elif a >= 18:
-        return 115      # Slight Right
+        return 100      # Slight Right
     elif a >= 10:
-        return 100      # Nudge Right
+        return 95       # Nudge Right
     elif a >= -10:
         return 90       # Straight  ← ±10° dead-band
     elif a >= -17:
-        return 80       # Nudge Left
+        return 85       # Nudge Left
     elif a >= -27:
-        return 65       # Slight Left
+        return 80       # Slight Left
     elif a >= -37:
-        return 55       # Moderate Left
+        return 75       # Moderate Left
     else:
-        return 45       # Hard Left
+        return 70       # Hard Left
 
 
 def angle_deg_to_servo_held(angle_deg: float) -> int | None:
     """
-    Majority-vote steering: collects servo candidates into a rolling window
-    (STEER_VOTE_WINDOW frames) and only commits a value when at least
-    STEER_VOTE_THRESHOLD frames agree. Returns None until consensus is reached.
+    Two-stage filter:
+    1. EMA smooths the raw angle first (removes noisy/spiked CLRNet readings)
+    2. Majority-vote on the EMA-smoothed servo value (confirms direction)
+    This ensures only angles that reliably reflect the true lane direction are sent.
+    Returns None until window is full or no consensus is reached.
     """
-    global _angle_window
-    candidate = angle_deg_to_servo(angle_deg)
+    global _angle_window, _ema_angle
+
+    # Stage 1: EMA smooth the raw angle
+    if _ema_angle is None:
+        _ema_angle = angle_deg  # seed on first frame
+        return None
+    _ema_angle = STEER_EMA_ALPHA * angle_deg + (1.0 - STEER_EMA_ALPHA) * _ema_angle
+
+    # Stage 2: Map smoothed angle to servo, then majority-vote
+    candidate = angle_deg_to_servo(_ema_angle)
     _angle_window.append(candidate)
 
     if len(_angle_window) < STEER_VOTE_WINDOW:
@@ -665,7 +700,7 @@ def visualize_angle(frame, angle):
 
 # --- MAIN THREAD: AI PROCESSING & DISPLAY ---
 def main():
-    global is_running, cv_ready, condition_since, last_auto_stop_send_ts
+    global is_running, cv_ready, condition_since
     print('[LAPTOP] Loading AI Models... Please wait.')
     device = choose_device(DEFAULT_DEVICE)
     cfg = Config.fromfile(resolve_path(DEFAULT_CONFIG))
@@ -775,7 +810,7 @@ def main():
                     front_stop_conditions.append('No lane Detected')
                     front_stop_conditions.append('Robot out of lane')
                 
-                steer_helper = SteeringHelper(lanes_xy_front, frame_width=vis_front.shape[1], n_samples=20, threshold=10)
+                steer_helper = SteeringHelper(lanes_xy_front, vis_front.shape[:2], n_samples=20, threshold=10)
                 steer_angle = max(min(steer_helper.heading_angle, math.radians(45)), -math.radians(45))
                 latest_angle_deg = round(math.degrees(steer_angle), 2)
 
@@ -897,21 +932,17 @@ def main():
                     del condition_since[key]
 
             if len(actuator_stop_conditions) > 0:
-                now = time.time()
-                if (now - last_auto_stop_send_ts) >= AUTO_STOP_COOLDOWN_SEC:
-                    print(f"[AUTO-STOP] Hard stop triggered: {actuator_stop_conditions}")
-                    forward_command_to_pi('STOP')
-                    reset_steering_to_default()
-                    last_auto_stop_send_ts = now
-                    with state_lock:
-                        latest_state['auto_stop_reason'] = actuator_stop_conditions
-                        latest_state['running'] = False
-                    is_running = False
-                    pi_started = False
-                    auto_stop_ts = time.time()
-                    broadcast_status(force=True)
-                    with state_lock:
-                        latest_state['auto_stop_reason'] = []
+                print(f"[AUTO-STOP] Hard stop triggered: {actuator_stop_conditions}")
+                forward_command_to_pi('STOP')
+                reset_steering_to_default()
+                full_state_reset()
+                with state_lock:
+                    latest_state['auto_stop_reason'] = actuator_stop_conditions
+                    latest_state['running'] = False
+                is_running = False
+                broadcast_status(force=True)
+                with state_lock:
+                    latest_state['auto_stop_reason'] = []
 
             # Always send steering updates; Arduino/Pi can decide what to do while STOP is active.
             if is_running:
@@ -930,17 +961,6 @@ def main():
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
         else:
-            # Idle / auto-stopped: check for auto-resume if enabled
-            if AUTO_RESUME_SEC > 0 and auto_stop_ts > 0:
-                if (time.time() - auto_stop_ts) >= AUTO_RESUME_SEC:
-                    print(f'[AUTO-RESUME] {AUTO_RESUME_SEC}s elapsed since auto-stop — resuming')
-                    is_running = True
-                    pi_started = False
-                    condition_since = {}
-                    auto_stop_ts = 0.0
-                    with state_lock:
-                        latest_state['running'] = True
-                    broadcast_status(force=True)
             # Idle preview mode: keep showing raw feeds on laptop even before START
             cv2.putText(front_display, 'MODE: IDLE (RAW)', (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
             cv2.putText(rear_display,  'MODE: IDLE (RAW)', (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
