@@ -1,5 +1,6 @@
 import importlib
 import threading
+import time
 
 import Demo3.states.globals as g
 from Demo3.connection.commands import (
@@ -17,7 +18,7 @@ from Demo3.vision.helpers.YOLO_helpers import *
 from Demo3.vision.helpers.lane_helpers import *
 from Demo3.vision.frame_processor import *
 from Demo3.vision.helpers.lane_fixer import LaneFixer
-from Demo3.vision.helpers.steering_helper import SteeringHelper, angle_deg_to_servo, get_rear_servo, calculate_angle_to_center
+from Demo3.vision.helpers.steering_helper import SteeringHelper, get_rear_servo, calculate_angle_to_center
 from Demo3.vision.helpers.focus_helper import FocusHelper
 
 def main():
@@ -134,27 +135,22 @@ def main():
                 # 8e. Steering angle calculation
                 steer_helper = None
                 if g.state == 'STRAIGHT':
-                    steer_helper = SteeringHelper(lanes_xy_front, vis_front.shape[:2], n_samples=20,
-                                                  threshold=STRAIGHT_THRESHOLD)
+                    steer_helper = SteeringHelper(lanes_xy_front, vis_front.shape[:2], n_samples=20)
                 if g.state == 'LEFT' or g.state == 'RIGHT':
-                    steer_helper = SteeringHelper(lanes_xy_front, vis_front.shape[:2], n_samples=20,
-                                                  threshold=STEER_THRESHOLD)
+                    steer_helper = SteeringHelper(lanes_xy_front, vis_front.shape[:2], n_samples=20)
+                steer_angle = max(min(steer_helper.heading_angle, MINMAX_ANGLE), MINMAX_ANGLE)
+                latest_angle_deg = round(steer_angle, 1)
 
-                steer_angle = max(min(steer_helper.heading_angle, math.radians(MINMAX_ANGLE)),
-                                  -math.radians(MINMAX_ANGLE))
-                latest_angle_deg = round(math.degrees(steer_angle), 2)
-
+                # 8f. Update front state
                 robot_status = 'OUT_OF_LANE' if len(lanes_xy_front) == 0 else 'NORMAL'
                 if abs(steer_helper.heading_angle) >= math.radians(70):
                     robot_status = 'LARGE_ANGLE'
                     front_stop_conditions.append('Corner Angle too extreme')
 
-                # 8f. Update front state
-                servo_val = angle_deg_to_servo(latest_angle_deg)
                 with g.state_lock:
                     g.latest_state['front'] = {
                         'robot_status': robot_status,
-                        'FRONT_ANGLE': f'FRONT_ANGLE={servo_val}',
+                        'FRONT_ANGLE': f'FRONT_ANGLE={latest_angle_deg}',
                         'object_detection': front_detection_output,
                         'stop_conditions': front_stop_conditions,
                     }

@@ -157,8 +157,14 @@ def send_angles_to_pi(angle_front, rear_servo=90):
         g.pi_started = True
 
     front_servo = angle_deg_to_servo_held(angle_front)
-    if front_servo is None:
-        return  # Angle hasn't been stable for STEER_HOLD_SEC yet — skip update
+    if front_servo is not None:
+        # update current_angle for servo
+        g.current_angle = g.current_angle + front_servo
+        front_servo = g.current_angle
+        if abs(g.current_angle - 90) > STATE_THRESHOLD:
+            g.state = 'LEFT' if g.current_angle < 90 else 'RIGHT'
+    else:
+        front_servo = g.current_angle
 
     body = f"FRONT_ANGLE={front_servo},REAR_ANGLE={rear_servo}"
     for pi_ip in PI_IPS:

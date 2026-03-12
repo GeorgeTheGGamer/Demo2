@@ -25,7 +25,7 @@ class SteeringHelper:
         self.left_points = []
         self.right_points = []
 
-        if not lanes_xy or len(lanes_xy) < 2:
+        if not lanes_xy:
             return
 
         candidates = list(lanes_xy)
@@ -40,7 +40,6 @@ class SteeringHelper:
             self.left_points  = candidates[0]
             self.right_points = candidates[0]
             self.n_samples  = n_samples
-            self.threshold  = threshold
             self.left_coef  = self.poly_fit(self.left_points)
             self.right_coef = self.right_coef = self.left_coef
             self.center_points = self.sample_centerline()
@@ -82,7 +81,6 @@ class SteeringHelper:
 
         # Fit & compute
         self.n_samples  = n_samples
-        self.threshold  = threshold
         self.left_coef  = self.poly_fit(self.left_points)
         self.right_coef = self.poly_fit(self.right_points)
         self.center_points  = self.sample_centerline()
@@ -165,68 +163,36 @@ class SteeringHelper:
         theta2_deg = math.degrees(theta2)
 
         # Priority: 1. angle heading to center of lane 2. keep car go in correct direction 3. 0
-        if abs(theta_deg) >= self.threshold:
+        if abs(theta_deg) >= g.current_threshold:
             return theta_deg
-        elif abs(theta2_deg) >= self.threshold:
+        elif abs(theta2_deg) >= g.current_threshold:
             return theta2_deg
         else:
             return 0.0
 
-def angle_deg_to_servo(angle_deg: float) -> int:
+def angle_deg_to_servo_held(angle_deg: float) -> float | None:
     """
-    Map heading angle (-45 to +45 degrees) to fixed servo constants (70-110).
-    Positive angle = turn right -> higher servo value (towards 110)
-    Negative angle = turn left  -> lower servo value  (towards 70)
-    90 = straight ahead. Dead-band: ±10° to account for angle inaccuracy.
-    Fixed constants: 70, 75, 80, 85, 90, 95, 100, 105, 110 (5° increments)
+    Appends raw angle to window, then checks if the tail shows an overall
+    increasing or decreasing trend by comparing abs(first) vs abs(last).
+    Allows gaps/noise in between (e.g. [5,2,10,5,15] counts as increasing).
+    If trend detected, returns tail[0] and subtracts it from all window values.
     """
-    a = angle_deg
-    if a >= 38:
-        return 110  # Hard Right
-    elif a >= 28:
-        return 105  # Moderate Right
-    elif a >= 18:
-        return 100  # Slight Right
-    elif a >= 10:
-        return 95  # Nudge Right
-    elif a >= -10:
-        return 90  # Straight  ← ±10° dead-band
-    elif a >= -17:
-        return 85  # Nudge Left
-    elif a >= -27:
-        return 80  # Slight Left
-    elif a >= -37:
-        return 75  # Moderate Left
-    else:
-        return 70  # Hard Left
+    g.angle_window.append(angle_deg)
+    if len(g.angle_window) < STEER_VOTE_WINDOW:
+        return None # not enough data yet
 
+    tail = list(g.angle_window)[-STEER_VOTE_THRESHOLD:]
 
-def angle_deg_to_servo_held(angle_deg: float) -> int | None:
-    """
-    Two-stage filter:
-    1. EMA smooths the raw angle first (removes noisy/spiked CLRNet readings)
-    2. Majority-vote on the EMA-smoothed servo value (confirms direction)
-    This ensures only angles that reliably reflect the true lane direction are sent.
-    Returns None until window is full or no consensus is reached.
-    """
-    # Stage 1: EMA smooth the raw angle
-    if g._ema_angle is None:
-        g._ema_angle = angle_deg  # seed on first frame
-        return None
-    g._ema_angle = STEER_EMA_ALPHA * angle_deg + (1.0 - STEER_EMA_ALPHA) * g._ema_angle
+    growing   = sum(1 for v in tail if abs(v) > abs(tail[0]))
+    shrinking = sum(1 for v in tail if abs(v) < abs(tail[0]))
 
-    # Stage 2: Map smoothed angle to servo, then majority-vote
-    candidate = angle_deg_to_servo(g._ema_angle)
-    g._angle_window.append(candidate)
+    if growing >= STEER_VOTE_THRESHOLD or shrinking >= STEER_VOTE_THRESHOLD:
+        result = tail[0]
+        for i in range(len(g.angle_window)):
+            g.angle_window[i] -= result
+        return result
 
-    if len(g._angle_window) < STEER_VOTE_WINDOW:
-        return None  # window not yet full
-
-    majority = max(set(g._angle_window), key=g._angle_window.count)
-    if g._angle_window.count(majority) >= STEER_VOTE_THRESHOLD:
-        return majority
-
-    return None  # no consensus yet
+    return None
 
 def rear_angle_to_servo(angle_deg: float) -> int:
     """
@@ -252,14 +218,14 @@ def get_rear_servo(angle_deg, feet_detected: bool) -> int:
 
     if feet_detected:
         servo = rear_angle_to_servo(angle_deg if angle_deg is not None else 0.0)
-        g._rear_servo_state['servo'] = servo
-        g._rear_servo_state['last_seen'] = now
+        g.rear_servo_state['servo'] = servo
+        g.rear_servo_state['last_seen'] = now
         return servo
     else:
         # No feet — hold last position until timeout, then centre
-        if (now - g._rear_servo_state['last_seen']) >= REAR_NO_FEET_HOLD_SEC:
-            g._rear_servo_state['servo'] = 90
-        return g._rear_servo_state['servo']
+        if (now - g.rear_servo_state['last_seen']) >= REAR_NO_FEET_HOLD_SEC:
+            g.rear_servo_state['servo'] = 90
+        return g.rear_servo_state['servo']
 
 def calculate_angle_to_center(midpoint, frame):
     frame_height, frame_width = frame.shape[:2]

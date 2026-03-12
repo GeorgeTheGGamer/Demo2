@@ -23,8 +23,9 @@ DEFAULT_DEVICE = 'mps' # Change to 'cuda' or 'cpu' as needed
 DEFAULT_FRONT_YOLO = 'checkpoints/yolov8n_int8.tflite'
 DEFAULT_REAR_POSE = 'checkpoints/yolov8n-pose_int8.tflite'
 MINMAX_ANGLE = 45.0  # Max heading angle in degrees for servo mapping
-STRAIGHT_THRESHOLD = 5
-STEER_THRESHOLD = 10
+STRAIGHT_THRESHOLD = 5 # angle within ± this value will be ignored
+STEER_THRESHOLD = 10 # angle within ± this value will be ignored
+STATE_THRESHOLD = 20 # If current_angle deviates from 90 by more than this, update state to LEFT/RIGHT
 
 # --- STOP CONDITION HOLD TIMES (seconds) ---
 # How long a condition must be continuously active before STOP is sent to Pi.
@@ -39,6 +40,7 @@ HOLD_NO_FEET_SEC           = 15.0   # Rear: no ankles detected at all
 HOLD_REAR_NO_LANE_SEC      = 8.0   # Rear: CLRNet detects 0 lanes
 HOLD_REAR_OUT_LANE_SEC     = 8.0   # Rear: robot out of lane
 
+# TODO: Remove it? (not used)
 # How long (seconds) the heading angle must remain within the same servo
 # threshold band before the servo is actually updated. Prevents jitter on
 # borderline angles and makes turning smoother.
@@ -56,4 +58,3 @@ FRAME_MAX_AGE_SEC = 6.0
 # E.g. window=5, threshold=3 means 3/5 EMA-smoothed frames must agree.
 STEER_VOTE_WINDOW    = 5    # rolling window size (reduced for low-FPS responsiveness)
 STEER_VOTE_THRESHOLD = 3    # minimum votes needed (out of STEER_VOTE_WINDOW)
-STEER_EMA_ALPHA      = 0.4  # EMA smoothing factor: 0=no update, 1=no smoothing. Tune during testing.

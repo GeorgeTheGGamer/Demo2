@@ -22,10 +22,10 @@ state = 'STRAIGHT'
 
 
 # Steering hold state: tracks the current candidate servo value and when it was first seen
-_steer_candidate = {'servo': None, 'since': 0.0}
+steer_candidate = {'servo': None, 'since': 0.0}
 
 # Rear servo state: tracks last committed servo value and last time feet were detected
-_rear_servo_state = {'servo': 90, 'last_seen': 0.0}
+rear_servo_state = {'servo': 90, 'last_seen': 0.0}
 
 # Frame timestamps — updated by receive threads; used for staleness checks
 front_frame_ts = 0.0
@@ -41,10 +41,12 @@ ws_clients = set()
 last_ws_push_ts = 0.0
 WS_PUSH_HZ = 5.0
 
-# Rolling window of recent servo candidates for majority-vote steering
-_angle_window: deque = deque(maxlen=STEER_VOTE_WINDOW)
-# EMA state for raw angle smoothing (seeded on first frame)
-_ema_angle = None
+# Rolling window of recent servo candidates for growing-trend steering
+angle_window: deque = deque(maxlen=STEER_VOTE_WINDOW)
+
+# Dynamic steering threshold (degrees): angle is snapped to the nearest multiple of this value.
+current_threshold = STRAIGHT_THRESHOLD
+current_angle = 90.0
 
 latest_state = {
     'running': False,
@@ -68,15 +70,14 @@ def full_state_reset():
     Full reset of all runtime state. Called on STOP (manual or auto) so the
     next START is completely independent — no stale angles, conditions, or timers.
     """
-    global _steer_candidate, _rear_servo_state, _angle_window, _ema_angle
+    global steer_candidate, rear_servo_state, angle_window
     global condition_since, latest_front_frame, latest_rear_frame
     global front_frame_ts, rear_frame_ts, pi_started
 
     # Steering
-    _steer_candidate  = {'servo': None, 'since': 0.0}
-    _rear_servo_state = {'servo': 90, 'last_seen': 0.0}
-    _angle_window.clear()
-    _ema_angle = None
+    steer_candidate  = {'servo': None, 'since': 0.0}
+    rear_servo_state = {'servo': 90, 'last_seen': 0.0}
+    angle_window.clear()
 
     # Stop condition hold timers
     condition_since.clear()
@@ -92,11 +93,10 @@ def full_state_reset():
 
 def reset_steering_to_default():
     """Send both servos back to 90° (straight) and clear steering hold-timer state."""
-    global _steer_candidate, _rear_servo_state, _angle_window, _ema_angle
-    _steer_candidate = {'servo': None, 'since': 0.0}
-    _rear_servo_state = {'servo': 90, 'last_seen': 0.0}
-    _angle_window.clear()
-    _ema_angle = None
+    global steer_candidate, rear_servo_state, angle_window
+    steer_candidate  = {'servo': None, 'since': 0.0}
+    rear_servo_state = {'servo': 90, 'last_seen': 0.0}
+    angle_window.clear()
     body = "FRONT_ANGLE=90,REAR_ANGLE=90"
     for _ in range(3):  # send 3 times to survive UDP packet drops
         for pi_ip in PI_IPS:
