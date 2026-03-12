@@ -163,6 +163,8 @@ def send_angles_to_pi(angle_front, rear_servo=90):
         front_servo = g.current_angle
         if abs(g.current_angle - 90) > STATE_THRESHOLD:
             g.state = 'LEFT' if g.current_angle < 90 else 'RIGHT'
+        if abs(g.current_angle - 90) <= STRAIGHT_THRESHOLD:
+            g.state = 'STRAIGHT'
     else:
         front_servo = g.current_angle
 
