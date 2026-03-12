@@ -148,7 +148,7 @@ class SteeringHelper:
             return 0.0
 
         # New logic: use the center bottom point and the top point to calculate the heading angle.
-        x1, y1 = self.center_points[0] # top point (horizon)
+        x1, y1 = self.center_points[-5] # top point (horizon)
         x2, y2 = self.frame_width/2, self.frame_height # bottom point (representing car position)
 
         dx = x1 - x2
@@ -158,14 +158,19 @@ class SteeringHelper:
         theta_deg = math.degrees(theta)
 
         # Old angle to keep car go straight in straight lane
-        # TODO: only use it when on straight lane, otherwise it will cause wrong angle when lane is curved
         x3, y3 = self.center_points[-1] # bottom point (car position)
         dx2 = x3 - x2
         dy2 = y3 - y2
         theta2 = math.atan2(-dx2, -dy2)
         theta2_deg = math.degrees(theta2)
 
-        return theta, theta2_deg if abs(theta_deg) > self.threshold else 0.0
+        # Priority: 1. angle heading to center of lane 2. keep car go in correct direction 3. 0
+        if abs(theta_deg) >= self.threshold:
+            return theta_deg
+        elif abs(theta2_deg) >= self.threshold:
+            return theta2_deg
+        else:
+            return 0.0
 
     def visualization(self, frame):
         """

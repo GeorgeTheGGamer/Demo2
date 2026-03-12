@@ -42,6 +42,9 @@ DEFAULT_CHECKPOINT = 'checkpoints/tusimple_r18.pth'
 DEFAULT_DEVICE = 'mps' # Change to 'cuda' or 'cpu' as needed
 DEFAULT_FRONT_YOLO = 'checkpoints/yolov8n_int8.tflite'
 DEFAULT_REAR_POSE = 'checkpoints/yolov8n-pose_int8.tflite'
+MINMAX_ANGLE = 45.0  # Max heading angle in degrees for servo mapping
+STRAIGHT_THRESHOLD = 5
+STEER_THRESHOLD = 10
 
 # --- GLOBALS ---
 latest_rear_frame = None
@@ -51,6 +54,7 @@ cv_ready = False
 cv_ready_event = threading.Event()
 pi_started = False
 condition_since = {}   # { 'front:<cond>' | 'rear:<cond>' : first_seen_timestamp }
+state = 'STRAIGHT'
 
 # Steering hold state: tracks the current candidate servo value and when it was first seen
 _steer_candidate = {'servo': None, 'since': 0.0}
@@ -181,21 +185,6 @@ def extract_lane_xy(lanes, cfg, frame_shape):
             lanes_xy.append(xy)
     lanes_xy.sort(key=lambda xys: xys[0][0])
     return lanes_xy
-#
-# def draw_lanes(frame, lanes, cfg, line_width=4):
-#     lanes_xy = []
-#     h, w = frame.shape[:2]
-#     colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
-#     for i, lane in enumerate(lanes):
-#         pts = lane.to_array(cfg)
-#         xy = [(int(round(p[0])), int(round(p[1]))) for p in pts if 0 <= p[0] < w and 0 <= p[1] < h]
-#         if len(xy) >= 2:
-#             lanes_xy.append(xy)
-#             color = colors[i % len(colors)]
-#             for j in range(1, len(xy)):
-#                 cv2.line(frame, xy[j - 1], xy[j], color, thickness=line_width)
-#     return lanes_xy
-
 
 def interpolate_x_at_y(polyline, y):
     for i in range(1, len(polyline)):
@@ -809,9 +798,17 @@ def main():
                 if len(lanes_xy_front) == 0:
                     front_stop_conditions.append('No lane Detected')
                     front_stop_conditions.append('Robot out of lane')
-                
-                steer_helper = SteeringHelper(lanes_xy_front, vis_front.shape[:2], n_samples=20, threshold=10)
-                steer_angle = max(min(steer_helper.heading_angle, math.radians(45)), -math.radians(45))
+
+                steer_helper = None
+                # If current state is STRAIGHT, set threshold to STRAIGHT_THRESHOLD to make robot go straight.
+                if state == 'STRAIGHT':
+                    steer_helper = SteeringHelper(lanes_xy_front, vis_front.shape[:2], n_samples=20, threshold=STRAIGHT_THRESHOLD)
+
+                # If current state is LEFT or RIGHT, use the normal STEER_THRESHOLD to allow sharper turns.
+                if state == 'LEFT' or state == 'RIGHT':
+                    steer_helper = SteeringHelper(lanes_xy_front, vis_front.shape[:2], n_samples=20, threshold=STEER_THRESHOLD)
+
+                steer_angle = max(min(steer_helper.heading_angle, math.radians(MINMAX_ANGLE)), -math.radians(MINMAX_ANGLE))
                 latest_angle_deg = round(math.degrees(steer_angle), 2)
 
                 robot_status = 'OUT_OF_LANE' if len(lanes_xy_front) == 0 else 'NORMAL'
