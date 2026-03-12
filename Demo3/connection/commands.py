@@ -159,14 +159,25 @@ def send_angles_to_pi(angle_front, rear_servo=90):
     front_servo = angle_deg_to_servo_held(angle_front)
     if front_servo is not None:
         # update current_angle for servo
-        g.current_angle = g.current_angle + front_servo
-        front_servo = g.current_angle
-        if abs(g.current_angle - 90) > STATE_THRESHOLD:
-            g.state = 'LEFT' if g.current_angle < 90 else 'RIGHT'
-        if abs(g.current_angle - 90) <= STRAIGHT_THRESHOLD:
+        g.front_current_angle = g.front_current_angle + front_servo
+
+        # Clamp front angle to 90 +/- MINMAX
+        min_angle = 90 - MINMAX_ANGLE
+        max_angle = 90 + MINMAX_ANGLE
+        g.front_current_angle = max(min_angle, min(max_angle, g.front_current_angle))
+
+        if abs(g.front_current_angle - 90) > STATE_THRESHOLD:
+            g.state = 'LEFT' if g.front_current_angle < 90 else 'RIGHT'
+        if abs(g.front_current_angle - 90) <= STRAIGHT_THRESHOLD:
             g.state = 'STRAIGHT'
 
-    body = f"FRONT_ANGLE={g.current_angle},REAR_ANGLE={rear_servo}"
+    g.rear_current_angle = g.front_current_angle + rear_servo
+    # Clamp rear angle to 90 +/- MINMAX
+    min_angle = 90 - MINMAX_ANGLE
+    max_angle = 90 + MINMAX_ANGLE
+    g.rear_current_angle = max(min_angle, min(max_angle, g.rear_current_angle))
+
+    body = f"FRONT_ANGLE={g.front_current_angle},REAR_ANGLE={g.rear_current_angle}"
     for pi_ip in PI_IPS:
-        print(f"[PI STEER] {body} (front={angle_front:.2f}°, rear_servo={rear_servo}) -> {pi_ip}:{PI_CMD_PORT}")
-        g.tx_socket.sendto(body.encode('utf-8'), (pi_ip, PI_CMD_PORT))
+            print(f"[PI STEER] {body} (front={angle_front:.2f}°, rear_servo={rear_servo}) -> {pi_ip}:{PI_CMD_PORT}")
+            g.tx_socket.sendto(body.encode('utf-8'), (pi_ip, PI_CMD_PORT))

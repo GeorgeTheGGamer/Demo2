@@ -46,7 +46,8 @@ angle_window: deque = deque(maxlen=STEER_VOTE_WINDOW)
 
 # Dynamic steering threshold (degrees): angle is snapped to the nearest multiple of this value.
 current_threshold = STRAIGHT_THRESHOLD
-current_angle = 90.0
+front_current_angle = 90.0
+rear_current_angle = 90.0
 
 latest_state = {
     'running': False,
