@@ -7,10 +7,8 @@ import cv2
 MIN_POINTS = 3
 
 class SteeringHelper:
+    #TODO: make helper available to handle both cameras
 
-    #TODO: 1. remove threshold while in straight lines
-    #TODO: 2. add heading angle for steering
-    #TODO: 3. add lane angle and facing angle to keep car go straight in straight lane
     def __init__(self, lanes_xy, frame_shape , n_samples=20, threshold=30):
         """
         lanes_xy   : list of N lanes, each lane is a list of (x, y) tuples, sorted left→right by x.
@@ -172,30 +170,107 @@ class SteeringHelper:
         else:
             return 0.0
 
-    def visualization(self, frame):
-        """
-        Visualize centerline and heading angle on the frame.
-        frame: input image to plot on
-        """
+def angle_deg_to_servo(angle_deg: float) -> int:
+    """
+    Map heading angle (-45 to +45 degrees) to fixed servo constants (70-110).
+    Positive angle = turn right -> higher servo value (towards 110)
+    Negative angle = turn left  -> lower servo value  (towards 70)
+    90 = straight ahead. Dead-band: ±10° to account for angle inaccuracy.
+    Fixed constants: 70, 75, 80, 85, 90, 95, 100, 105, 110 (5° increments)
+    """
+    a = angle_deg
+    if a >= 38:
+        return 110  # Hard Right
+    elif a >= 28:
+        return 105  # Moderate Right
+    elif a >= 18:
+        return 100  # Slight Right
+    elif a >= 10:
+        return 95  # Nudge Right
+    elif a >= -10:
+        return 90  # Straight  ← ±10° dead-band
+    elif a >= -17:
+        return 85  # Nudge Left
+    elif a >= -27:
+        return 80  # Slight Left
+    elif a >= -37:
+        return 75  # Moderate Left
+    else:
+        return 70  # Hard Left
 
-        if len(self.center_points) > 2:
-            # Draw centerline points only (no connecting line)
-            for (x, y) in self.center_points:
-                cv2.circle(frame, (int(x), int(y)), 3, (0, 255, 255), -1)
 
-        # Draw heading angle
-        h, w = frame.shape[:2]
-        cx, cy = int(w / 2), h  # Start from bottom center
-        length = 100
+def angle_deg_to_servo_held(angle_deg: float) -> int | None:
+    """
+    Two-stage filter:
+    1. EMA smooths the raw angle first (removes noisy/spiked CLRNet readings)
+    2. Majority-vote on the EMA-smoothed servo value (confirms direction)
+    This ensures only angles that reliably reflect the true lane direction are sent.
+    Returns None until window is full or no consensus is reached.
+    """
+    global _angle_window, _ema_angle
 
-        # Calc end points of the heading line based on the angle
-        # positive theta = left turn → end_x moves left (cx decreases)
-        end_x = int(cx + length * math.sin(self.heading_angle))
-        end_y = int(cy - length * math.cos(self.heading_angle))
+    # Stage 1: EMA smooth the raw angle
+    if _ema_angle is None:
+        _ema_angle = angle_deg  # seed on first frame
+        return None
+    _ema_angle = STEER_EMA_ALPHA * angle_deg + (1.0 - STEER_EMA_ALPHA) * _ema_angle
 
-        cv2.line(frame, (cx, cy), (end_x, end_y), (0, 0, 255), 4)
+    # Stage 2: Map smoothed angle to servo, then majority-vote
+    candidate = angle_deg_to_servo(_ema_angle)
+    _angle_window.append(candidate)
 
-        # Display Angle Text
-        angle_deg = math.degrees(self.heading_angle)
-        cv2.putText(frame, f"Steering: {angle_deg:.2f} deg", (50, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+    if len(_angle_window) < STEER_VOTE_WINDOW:
+        return None  # window not yet full
+
+    majority = max(set(_angle_window), key=_angle_window.count)
+    if _angle_window.count(majority) >= STEER_VOTE_THRESHOLD:
+        return majority
+
+    return None  # no consensus yet
+
+def rear_angle_to_servo(angle_deg: float) -> int:
+    """
+    Map rear heading angle (-45 to +45 degrees) to a servo value in 5-degree
+    increments between 45 and 135.
+    Positive angle = person to the right -> higher servo (towards 135)
+    Negative angle = person to the left  -> lower servo  (towards 45)
+    90 = centred
+    """
+    clamped = max(min(angle_deg, 45.0), -45.0)
+    raw = 90.0 + clamped
+    snapped = round(raw / 5.0) * 5
+    return max(45, min(135, snapped))
+
+def get_rear_servo(angle_deg, feet_detected: bool) -> int:
+    """
+    Returns the rear servo value (45-135 in 5° increments).
+    - If feet are detected: compute from angle and update last-seen timestamp.
+    - If no feet: hold last position. After REAR_NO_FEET_HOLD_SEC seconds,
+      reset to 90° (centre).
+    """
+    global _rear_servo_state
+    now = time.time()
+
+    if feet_detected:
+        servo = rear_angle_to_servo(angle_deg if angle_deg is not None else 0.0)
+        _rear_servo_state['servo'] = servo
+        _rear_servo_state['last_seen'] = now
+        return servo
+    else:
+        # No feet — hold last position until timeout, then centre
+        if (now - _rear_servo_state['last_seen']) >= REAR_NO_FEET_HOLD_SEC:
+            _rear_servo_state['servo'] = 90
+        return _rear_servo_state['servo']
+
+def calculate_angle_to_center(midpoint, frame):
+    frame_height, frame_width = frame.shape[:2]
+    if midpoint is None:
+        return None
+
+    # Vector from midpoint to top-center (frame_width/2, 0)
+    center_x = frame_width / 2
+    dx = midpoint[0] - center_x
+    dy = 0 - midpoint[1]
+    angle_x = np.degrees(np.arctan2(dx, -dy))
+
+    return angle_x

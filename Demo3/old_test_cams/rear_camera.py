@@ -15,7 +15,7 @@ import importlib
 from clrnet.models.registry import build_net
 from clrnet.utils.config import Config
 import poseDetector as pD
-from tools.helper.lane_fixer import LaneFixer
+from Demo3.vision.helpers.lane_fixer import LaneFixer
 
 
 # -----------------------------

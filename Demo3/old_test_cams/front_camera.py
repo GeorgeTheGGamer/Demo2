@@ -16,10 +16,10 @@ import importlib
 
 from clrnet.models.registry import build_net
 from clrnet.utils.config import Config
-from tools.helper.steering_helper import SteeringHelper
-from tools.helper.hough_lane_detect import LaneDetector
-import tools.YOLOv8n.objectDetector as oD
-from tools.helper.lane_fixer import LaneFixer
+from Demo3.vision.helpers.steering_helper import SteeringHelper
+from Demo3.helper.hough_lane_detect import LaneDetector
+import Demo3.vision.objectDetector as oD
+from Demo3.vision.helpers.lane_fixer import LaneFixer
 
 # -----------------------------
 # Local run defaults (edit here)

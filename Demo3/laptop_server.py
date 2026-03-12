@@ -13,7 +13,6 @@ import numpy as np
 from flask import Flask, request, jsonify
 from flask_sock import Sock
 
-from tools.helper.focus_helper import FocusHelper
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if PROJECT_ROOT not in sys.path:
@@ -22,10 +21,10 @@ if PROJECT_ROOT not in sys.path:
 # --- AI & AUTONOMY IMPORTS ---
 from clrnet.models.registry import build_net
 from clrnet.utils.config import Config
-import objectDetector as oD
-import poseDetector as pD
-from tools.helper.steering_helper import SteeringHelper
-from tools.helper.lane_fixer import LaneFixer
+from Demo3.vision.helpers.YOLO_helpers import *
+from Demo3.vision.helpers.steering_helper import SteeringHelper
+from Demo3.vision.helpers.lane_fixer import LaneFixer
+from Demo3.vision.helpers.focus_helper import FocusHelper
 
 # --- CONFIGURATION ---
 HOST_IP = "0.0.0.0"
@@ -39,12 +38,9 @@ PI_CMD_PORT = 8001
 
 DEFAULT_CONFIG = 'configs/clrnet/clr_resnet18_tusimple.py'
 DEFAULT_CHECKPOINT = 'checkpoints/tusimple_r18.pth'
-DEFAULT_DEVICE = 'mps' # Change to 'cuda' or 'cpu' as needed
+DEFAULT_DEVICE = 'mps'  # Change to 'cuda' or 'cpu' as needed
 DEFAULT_FRONT_YOLO = 'checkpoints/yolov8n_int8.tflite'
 DEFAULT_REAR_POSE = 'checkpoints/yolov8n-pose_int8.tflite'
-MINMAX_ANGLE = 45.0  # Max heading angle in degrees for servo mapping
-STRAIGHT_THRESHOLD = 5
-STEER_THRESHOLD = 10
 
 # --- GLOBALS ---
 latest_rear_frame = None
@@ -53,8 +49,7 @@ is_running = False
 cv_ready = False
 cv_ready_event = threading.Event()
 pi_started = False
-condition_since = {}   # { 'front:<cond>' | 'rear:<cond>' : first_seen_timestamp }
-state = 'STRAIGHT'
+condition_since = {}  # { 'front:<cond>' | 'rear:<cond>' : first_seen_timestamp }
 
 # Steering hold state: tracks the current candidate servo value and when it was first seen
 _steer_candidate = {'servo': None, 'since': 0.0}
@@ -64,7 +59,7 @@ _rear_servo_state = {'servo': 90, 'last_seen': 0.0}
 
 # Frame timestamps — updated by receive threads; used for staleness checks
 front_frame_ts = 0.0
-rear_frame_ts  = 0.0
+rear_frame_ts = 0.0
 
 tx_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 app = Flask(__name__)
@@ -79,16 +74,16 @@ WS_PUSH_HZ = 5.0
 # --- STOP CONDITION HOLD TIMES (seconds) ---
 # How long a condition must be continuously active before STOP is sent to Pi.
 # Raise for more leniency, lower for faster response.
-HOLD_OBJECT_IN_LANE_SEC    = 10.0   # Front: YOLO object inside lane
-HOLD_CORNER_ANGLE_SEC      = 6.0   # Front: heading angle >= 70 degrees
-HOLD_FRONT_NO_LANE_SEC     = 8.0   # Front: CLRNet detects 0 lanes
-HOLD_FRONT_OUT_LANE_SEC    = 8.0   # Front: robot out of lane
-HOLD_LEFT_FOOT_SEC         = 10.0   # Rear: left ankle outside lane
-HOLD_RIGHT_FOOT_SEC        = 10.0   # Rear: right ankle outside lane
-HOLD_BOTH_FEET_SEC         = 10.0   # Rear: both ankles outside lane
-HOLD_NO_FEET_SEC           = 15.0   # Rear: no ankles detected at all
-HOLD_REAR_NO_LANE_SEC      = 8.0   # Rear: CLRNet detects 0 lanes
-HOLD_REAR_OUT_LANE_SEC     = 8.0   # Rear: robot out of lane
+HOLD_OBJECT_IN_LANE_SEC = 10.0  # Front: YOLO object inside lane
+HOLD_CORNER_ANGLE_SEC = 6.0  # Front: heading angle >= 70 degrees
+HOLD_FRONT_NO_LANE_SEC = 8.0  # Front: CLRNet detects 0 lanes
+HOLD_FRONT_OUT_LANE_SEC = 8.0  # Front: robot out of lane
+HOLD_LEFT_FOOT_SEC = 10.0  # Rear: left ankle outside lane
+HOLD_RIGHT_FOOT_SEC = 10.0  # Rear: right ankle outside lane
+HOLD_BOTH_FEET_SEC = 10.0  # Rear: both ankles outside lane
+HOLD_NO_FEET_SEC = 15.0  # Rear: no ankles detected at all
+HOLD_REAR_NO_LANE_SEC = 8.0  # Rear: CLRNet detects 0 lanes
+HOLD_REAR_OUT_LANE_SEC = 8.0  # Rear: robot out of lane
 
 # How long (seconds) the heading angle must remain within the same servo
 # threshold band before the servo is actually updated. Prevents jitter on
@@ -105,9 +100,9 @@ FRAME_MAX_AGE_SEC = 6.0
 # agreement count required before a new servo value is committed.
 # EMA smooths the raw angle first, then majority-vote confirms direction.
 # E.g. window=5, threshold=3 means 3/5 EMA-smoothed frames must agree.
-STEER_VOTE_WINDOW    = 5    # rolling window size (reduced for low-FPS responsiveness)
-STEER_VOTE_THRESHOLD = 3    # minimum votes needed (out of STEER_VOTE_WINDOW)
-STEER_EMA_ALPHA      = 0.4  # EMA smoothing factor: 0=no update, 1=no smoothing. Tune during testing.
+STEER_VOTE_WINDOW = 5  # rolling window size (reduced for low-FPS responsiveness)
+STEER_VOTE_THRESHOLD = 3  # minimum votes needed (out of STEER_VOTE_WINDOW)
+STEER_EMA_ALPHA = 0.4  # EMA smoothing factor: 0=no update, 1=no smoothing. Tune during testing.
 
 # Rolling window of recent servo candidates for majority-vote steering
 _angle_window: deque = deque(maxlen=STEER_VOTE_WINDOW)
@@ -246,9 +241,9 @@ def build_front_detection(objects, lanes_xy, frame_shape, names=None, close_rati
     for obj in objects:
         x1, y1, x2, y2 = obj['bbox']
         in_lane = (
-            is_point_in_lane((x1, y2), lanes_xy)
-            or is_point_in_lane(((x1 + x2) / 2.0, y2), lanes_xy)
-            or is_point_in_lane((x2, y2), lanes_xy)
+                is_point_in_lane((x1, y2), lanes_xy)
+                or is_point_in_lane(((x1 + x2) / 2.0, y2), lanes_xy)
+                or is_point_in_lane((x2, y2), lanes_xy)
         )
         box_w = max(0.0, x2 - x1)
         box_h = max(0.0, y2 - y1)
@@ -361,7 +356,7 @@ def full_state_reset():
     global front_frame_ts, rear_frame_ts, pi_started
 
     # Steering
-    _steer_candidate  = {'servo': None, 'since': 0.0}
+    _steer_candidate = {'servo': None, 'since': 0.0}
     _rear_servo_state = {'servo': 90, 'last_seen': 0.0}
     _angle_window.clear()
     _ema_angle = None
@@ -371,9 +366,9 @@ def full_state_reset():
 
     # Drop stale frames so next run starts fresh
     latest_front_frame = None
-    latest_rear_frame  = None
-    front_frame_ts     = 0.0
-    rear_frame_ts      = 0.0
+    latest_rear_frame = None
+    front_frame_ts = 0.0
+    rear_frame_ts = 0.0
 
     # Pi handshake — force re-START on next run
     pi_started = False
@@ -476,23 +471,23 @@ def angle_deg_to_servo(angle_deg: float) -> int:
     """
     a = angle_deg
     if a >= 38:
-        return 110      # Hard Right
+        return 110  # Hard Right
     elif a >= 28:
-        return 105      # Moderate Right
+        return 105  # Moderate Right
     elif a >= 18:
-        return 100      # Slight Right
+        return 100  # Slight Right
     elif a >= 10:
-        return 95       # Nudge Right
+        return 95  # Nudge Right
     elif a >= -10:
-        return 90       # Straight  ← ±10° dead-band
+        return 90  # Straight  ← ±10° dead-band
     elif a >= -17:
-        return 85       # Nudge Left
+        return 85  # Nudge Left
     elif a >= -27:
-        return 80       # Slight Left
+        return 80  # Slight Left
     elif a >= -37:
-        return 75       # Moderate Left
+        return 75  # Moderate Left
     else:
-        return 70       # Hard Left
+        return 70  # Hard Left
 
 
 def angle_deg_to_servo_held(angle_deg: float) -> int | None:
@@ -620,9 +615,9 @@ def draw_front_objects(frame, objects, lanes_xy, names=None):
         x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
         conf = float(obj.get('conf', 0.0))
         in_lane = (
-            is_point_in_lane((x1, y2), lanes_xy)
-            or is_point_in_lane(((x1 + x2) / 2.0, y2), lanes_xy)
-            or is_point_in_lane((x2, y2), lanes_xy)
+                is_point_in_lane((x1, y2), lanes_xy)
+                or is_point_in_lane(((x1 + x2) / 2.0, y2), lanes_xy)
+                or is_point_in_lane((x2, y2), lanes_xy)
         )
 
         # Only display if any of the 3 bottom lane-contact points are in lane.
@@ -738,9 +733,9 @@ def main():
     while True:
         now_ts = time.time()
         front = latest_front_frame if (front_frame_ts > 0 and (now_ts - front_frame_ts) <= FRAME_MAX_AGE_SEC) else None
-        rear  = latest_rear_frame  if (rear_frame_ts  > 0 and (now_ts - rear_frame_ts)  <= FRAME_MAX_AGE_SEC) else None
+        rear = latest_rear_frame if (rear_frame_ts > 0 and (now_ts - rear_frame_ts) <= FRAME_MAX_AGE_SEC) else None
         front_display = front_placeholder.copy() if front is None else front.copy()
-        rear_display  = rear_placeholder.copy()  if rear  is None else rear.copy()
+        rear_display = rear_placeholder.copy() if rear is None else rear.copy()
 
         # --- CV warmup: run one inference as soon as first frame arrives ---
         if not cv_ready and front is not None:
@@ -757,7 +752,7 @@ def main():
 
         # Initialise per-frame condition lists (also used by auto-resume check in else block)
         front_stop_conditions = []
-        rear_stop_conditions  = []
+        rear_stop_conditions = []
 
         if is_running:
             latest_angle_deg = 0.0
@@ -766,7 +761,7 @@ def main():
             if front is not None:
                 frame_idx += 1
                 vis_front, t_front = preprocess_frame(front, cfg, device)
-                
+
                 with torch.inference_mode():
                     out_front = lane_model({'img': t_front})
                     lanes_front = lane_model.heads.get_lanes(out_front)[0]
@@ -777,7 +772,7 @@ def main():
                 draw_lanes(vis_front, lanes_xy_front)
 
                 if frame_idx % 2 == 0:
-                    cached_front_objects = oD.get_objects(vis_front.copy(), front_yolo, conf_thres=0.3)
+                    cached_front_objects = get_objects(vis_front.copy(), front_yolo, conf_thres=0.3)
 
                 draw_front_objects(
                     vis_front,
@@ -799,16 +794,8 @@ def main():
                     front_stop_conditions.append('No lane Detected')
                     front_stop_conditions.append('Robot out of lane')
 
-                steer_helper = None
-                # If current state is STRAIGHT, set threshold to STRAIGHT_THRESHOLD to make robot go straight.
-                if state == 'STRAIGHT':
-                    steer_helper = SteeringHelper(lanes_xy_front, vis_front.shape[:2], n_samples=20, threshold=STRAIGHT_THRESHOLD)
-
-                # If current state is LEFT or RIGHT, use the normal STEER_THRESHOLD to allow sharper turns.
-                if state == 'LEFT' or state == 'RIGHT':
-                    steer_helper = SteeringHelper(lanes_xy_front, vis_front.shape[:2], n_samples=20, threshold=STEER_THRESHOLD)
-
-                steer_angle = max(min(steer_helper.heading_angle, math.radians(MINMAX_ANGLE)), -math.radians(MINMAX_ANGLE))
+                steer_helper = SteeringHelper(lanes_xy_front, vis_front.shape[:2], n_samples=20, threshold=10)
+                steer_angle = max(min(steer_helper.heading_angle, math.radians(45)), -math.radians(45))
                 latest_angle_deg = round(math.degrees(steer_angle), 2)
 
                 robot_status = 'OUT_OF_LANE' if len(lanes_xy_front) == 0 else 'NORMAL'
@@ -830,7 +817,7 @@ def main():
 
             if rear is not None:
                 vis_rear, t_rear = preprocess_frame(rear, cfg, device)
-                
+
                 with torch.inference_mode():
                     out_rear = lane_model({'img': t_rear})
                     lanes_rear = lane_model.heads.get_lanes(out_rear)[0]
@@ -842,7 +829,7 @@ def main():
 
                 # left_ankle, right_ankle = pD.get_ankle(vis_rear.copy(), rear_pose)
                 # Get the focused ankle points using the FocusHelper, which may provide more stable detections by focusing on the expected person
-                ankles = pD.get_ankles(vis_rear.copy(), rear_pose)
+                ankles = get_ankles(vis_rear.copy(), rear_pose)
                 ankle_focus.update_frame_size(vis_rear.shape[1], vis_rear.shape[0])
                 left_ankle, right_ankle = ankle_focus.focus(ankles)
                 draw_ankle_point(vis_rear, left_ankle, (0, 255, 255), 'L ankle')
@@ -887,17 +874,17 @@ def main():
             # --- Per-condition hold-time evaluation ---
             # A condition must be continuously active for its hold duration before STOP fires.
             FRONT_HOLD = {
-                'If object is in lane':     HOLD_OBJECT_IN_LANE_SEC,
+                'If object is in lane': HOLD_OBJECT_IN_LANE_SEC,
                 'Corner Angle too extreme': HOLD_CORNER_ANGLE_SEC,
-                'No lane Detected':         HOLD_FRONT_NO_LANE_SEC,
-                'Robot out of lane':        HOLD_FRONT_OUT_LANE_SEC,
+                'No lane Detected': HOLD_FRONT_NO_LANE_SEC,
+                'Robot out of lane': HOLD_FRONT_OUT_LANE_SEC,
             }
             REAR_HOLD = {
-                'Left foot out':     HOLD_LEFT_FOOT_SEC,
-                'Right foot out':    HOLD_RIGHT_FOOT_SEC,
-                'Both feet out':     HOLD_BOTH_FEET_SEC,
-                'No feet detected':  HOLD_NO_FEET_SEC,
-                'No lane Detected':  HOLD_REAR_NO_LANE_SEC,
+                'Left foot out': HOLD_LEFT_FOOT_SEC,
+                'Right foot out': HOLD_RIGHT_FOOT_SEC,
+                'Both feet out': HOLD_BOTH_FEET_SEC,
+                'No feet detected': HOLD_NO_FEET_SEC,
+                'No lane Detected': HOLD_REAR_NO_LANE_SEC,
                 'Robot out of lane': HOLD_REAR_OUT_LANE_SEC,
             }
 
@@ -960,7 +947,7 @@ def main():
         else:
             # Idle preview mode: keep showing raw feeds on laptop even before START
             cv2.putText(front_display, 'MODE: IDLE (RAW)', (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
-            cv2.putText(rear_display,  'MODE: IDLE (RAW)', (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+            cv2.putText(rear_display, 'MODE: IDLE (RAW)', (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
             cv2.imshow("Front AI Camera", front_display)
             cv2.imshow("Rear Backup Camera", rear_display)
 
