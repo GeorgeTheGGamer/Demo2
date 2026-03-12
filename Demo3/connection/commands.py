@@ -165,10 +165,8 @@ def send_angles_to_pi(angle_front, rear_servo=90):
             g.state = 'LEFT' if g.current_angle < 90 else 'RIGHT'
         if abs(g.current_angle - 90) <= STRAIGHT_THRESHOLD:
             g.state = 'STRAIGHT'
-    else:
-        front_servo = g.current_angle
 
-    body = f"FRONT_ANGLE={front_servo},REAR_ANGLE={rear_servo}"
+    body = f"FRONT_ANGLE={g.current_angle},REAR_ANGLE={rear_servo}"
     for pi_ip in PI_IPS:
         print(f"[PI STEER] {body} (front={angle_front:.2f}°, rear_servo={rear_servo}) -> {pi_ip}:{PI_CMD_PORT}")
         g.tx_socket.sendto(body.encode('utf-8'), (pi_ip, PI_CMD_PORT))
