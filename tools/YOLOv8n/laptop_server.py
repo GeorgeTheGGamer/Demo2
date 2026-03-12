@@ -775,7 +775,7 @@ def main():
                     front_stop_conditions.append('No lane Detected')
                     front_stop_conditions.append('Robot out of lane')
                 
-                steer_helper = SteeringHelper(lanes_xy_front, frame_width=vis_front.shape[1], n_samples=20, threshold=10)
+                steer_helper = SteeringHelper(lanes_xy_front, vis_front.shape[:2] , n_samples=20, threshold=10)
                 steer_angle = max(min(steer_helper.heading_angle, math.radians(45)), -math.radians(45))
                 latest_angle_deg = round(math.degrees(steer_angle), 2)
 
