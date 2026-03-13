@@ -48,7 +48,9 @@ class FocusHelper:
         Returns the (left_ankle, right_ankle) pair closest to last known position.
         """
         if not ankles:
-            return self.last_coord_pair
+            if self.last_coord_pair is not None:
+                return self.last_coord_pair
+            return (None, None)
 
         if self.last_coord_pair is None:
             self.last_coord_pair = self.get_center_ankle(ankles)

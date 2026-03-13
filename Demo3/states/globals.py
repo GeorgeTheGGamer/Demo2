@@ -2,7 +2,6 @@
 
 import threading
 import socket
-import time
 from collections import deque
 from flask import Flask
 from flask_sock import Sock
@@ -99,8 +98,6 @@ def reset_steering_to_default():
     rear_servo_state = {'servo': 90, 'last_seen': 0.0}
     angle_window.clear()
     body = "FRONT_ANGLE=90,REAR_ANGLE=90"
-    for _ in range(3):  # send 3 times to survive UDP packet drops
-        for pi_ip in PI_IPS:
-            print(f"[PI STEER] RESET -> {body} -> {pi_ip}:{PI_CMD_PORT}")
-            tx_socket.sendto(body.encode('utf-8'), (pi_ip, PI_CMD_PORT))
-        time.sleep(0.05)
+    for pi_ip in PI_IPS:
+        print(f"[PI STEER] RESET -> {body} -> {pi_ip}:{PI_CMD_PORT}")
+        tx_socket.sendto(body.encode('utf-8'), (pi_ip, PI_CMD_PORT))

@@ -2,6 +2,7 @@
  for steering angle estimation."""
 import math
 import time
+from typing import Optional
 
 import numpy as np
 import Demo3.states.globals as g
@@ -24,6 +25,7 @@ class SteeringHelper:
         self.center_points = []
         self.left_points = []
         self.right_points = []
+        self.frame_height, self.frame_width = frame_shape[:2]
 
         if not lanes_xy:
             return
@@ -48,8 +50,6 @@ class SteeringHelper:
             return
 
         # Pick the lane pair that straddles the frame center
-        self.frame_width = frame_shape[1]
-        self.frame_height = frame_shape[0]
         cx = self.frame_width / 2.0
 
         def mean_x(lane):
@@ -170,7 +170,7 @@ class SteeringHelper:
         else:
             return 0.0
 
-def angle_deg_to_servo_held(angle_deg: float) -> float | None:
+def angle_deg_to_servo_held(angle_deg: float) -> Optional[float]:
     """
     Appends raw angle to window, then checks if the tail shows an overall
     increasing or decreasing trend by comparing abs(first) vs abs(last).
@@ -204,7 +204,7 @@ def rear_angle_to_servo(angle_deg: float) -> int:
     """
     clamped = max(min(angle_deg, 45.0), -45.0)
     raw = 90.0 + clamped
-    snapped = round(raw / 5.0) * 5
+    snapped = round(float(raw) / 5.0) * 5
     return max(45, min(135, snapped))
 
 def get_rear_servo(angle_deg, feet_detected: bool) -> int:

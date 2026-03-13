@@ -147,11 +147,12 @@ def receive_front_video():
             pass
 
 def send_angles_to_pi(angle_front, rear_servo=90):
+    # Hard-stop guard: never send angles if the robot has been stopped.
+    if not g.is_running:
+        return
+
     # On the very first angle of a run, send START to Pi first so it is ready to move.
-    # Guard with is_running to avoid a race where STOP arrives mid-loop.
     if not g.pi_started:
-        if not g.is_running:
-            return
         print('[PI CMD] First angle computed — sending START to Pi now')
         forward_command_to_pi('START')
         g.pi_started = True
@@ -177,7 +178,9 @@ def send_angles_to_pi(angle_front, rear_servo=90):
     max_angle = 90 + MINMAX_ANGLE
     g.rear_current_angle = max(min_angle, min(max_angle, g.rear_current_angle))
 
-    body = f"FRONT_ANGLE={g.front_current_angle},REAR_ANGLE={g.rear_current_angle}"
+    front_int = round(g.front_current_angle)
+    rear_int = round(g.rear_current_angle)
+    body = f"FRONT_ANGLE={front_int},REAR_ANGLE={rear_int}"
     for pi_ip in PI_IPS:
             print(f"[PI STEER] {body} (front={angle_front:.2f}°, rear_servo={rear_servo}) -> {pi_ip}:{PI_CMD_PORT}")
             g.tx_socket.sendto(body.encode('utf-8'), (pi_ip, PI_CMD_PORT))

@@ -267,18 +267,14 @@ def main():
                 if key not in active_keys:
                     del g.condition_since[key]
 
-            # --- 11. Auto-Stop Trigger ---
-            # Fire hard stop if any condition has exceeded its hold time.
+            # --- 11. Report Warning Conditions ---
+            # Inform the app about conditions that have exceeded hold time,
+            # but do NOT stop the robot — only End/hold from the app stops it.
             if len(actuator_stop_conditions) > 0:
-                print(f"[AUTO-STOP] Hard stop triggered: {actuator_stop_conditions}")
-                forward_command_to_pi('STOP')
-                g.reset_steering_to_default()
-                g.full_state_reset()
+                print(f"[WARNING] Conditions active: {actuator_stop_conditions}")
                 with g.state_lock:
                     g.latest_state['auto_stop_reason'] = actuator_stop_conditions
-                    g.latest_state['running'] = False
-                g.is_running = False
-                broadcast_status(force=True)
+            else:
                 with g.state_lock:
                     g.latest_state['auto_stop_reason'] = []
 
