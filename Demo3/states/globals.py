@@ -65,6 +65,12 @@ latest_state = {
     },
 }
 
+esp32_clients = []
+esp32_clients_lock = threading.Lock()
+# Internal gate timers (module-level state)
+left_out_since = None
+right_out_since = None
+
 def full_state_reset():
     """
     Full reset of all runtime state. Called on STOP (manual or auto) so the

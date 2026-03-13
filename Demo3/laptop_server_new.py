@@ -4,6 +4,7 @@ import time
 import os
 import sys
 
+
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -17,6 +18,7 @@ from Demo3.connection.commands import (
     forward_command_to_pi,
     broadcast_status,
 )
+from Demo3.connection.belt import run_esp32_status_server, push_rear_status_to_esp32
 from clrnet.utils.config import Config
 from clrnet.models.registry import build_net
 from Demo3.config.bootstrap import *
@@ -60,6 +62,7 @@ def main():
     threading.Thread(target=run_tcp_server, daemon=True).start()
     threading.Thread(target=receive_rear_video, daemon=True).start()
     threading.Thread(target=receive_front_video, daemon=True).start()
+    threading.Thread(target=run_esp32_status_server, daemon=True).start()
 
     # --- 4. Pre-loop Setup ---
     print('[CV] Waiting for first real front frame to confirm CV readiness...')
@@ -288,6 +291,7 @@ def main():
             with g.state_lock:
                 g.latest_state['running'] = g.is_running
             broadcast_status(force=False)
+            push_rear_status_to_esp32()
 
             cv2.putText(front_display, 'MODE: RUNNING CV', (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
             cv2.putText(rear_display,  'MODE: RUNNING CV', (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
