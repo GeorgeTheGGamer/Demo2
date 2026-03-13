@@ -46,6 +46,3 @@ tmp.*
 .vscode/*
 .idea/
 .ipynb_checkpoints/
-
-# Nested React Native app repo (tracked separately)
-SDP_TrackSense_App/
