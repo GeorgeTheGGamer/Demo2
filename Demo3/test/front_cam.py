@@ -24,7 +24,7 @@ from Demo3.vision.helpers.YOLO_helpers import *
 from Demo3.vision.helpers.lane_fixer import LaneFixer
 from Demo3.vision.helpers.lane_helpers import *
 from Demo3.vision.helpers.steering_helper import SteeringHelper
-from Demo3.connection.commands import run_tcp_server, send_angles_to_pi
+from Demo3.connection.commands import run_tcp_server, send_angles_to_pi, forward_command_to_pi
 
 
 def main():
@@ -65,6 +65,7 @@ def main():
     cached_front_objects = []
 
     print("[TEST] Front webcam test started. Press 'q' to quit.")
+    forward_command_to_pi("START")  # Ensure Pi is in START mode for testing
     while True:
         ok, frame = cap.read()
         if not ok or frame is None:
@@ -153,6 +154,7 @@ def main():
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
+    forward_command_to_pi("STOP")  # Ensure Pi is in STOP mode after testing
     cap.release()
     cv2.destroyAllWindows()
 

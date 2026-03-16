@@ -25,9 +25,9 @@ from Demo3.vision.helpers.lane_fixer import LaneFixer
 from Demo3.vision.helpers.lane_helpers import *
 from Demo3.vision.helpers.steering_helper import calculate_angle_to_center, get_rear_servo
 from Demo3.connection.belt import run_esp32_status_server, push_rear_status_to_esp32
-from Demo3.connection.commands import run_tcp_server, send_angles_to_pi
+from Demo3.connection.commands import run_tcp_server, send_angles_to_pi, forward_command_to_pi
 
-
+# TODO: check payloads sent to Pi and ESP32 for correctness during testing
 def main():
     print("[Test] Starting TCP server thread...")
     # Start TCP server in a separate thread (non-blocking).
@@ -69,6 +69,8 @@ def main():
         return
 
     print("[TEST] Rear webcam test started. Press 'q' to quit.")
+    forward_command_to_pi("START")  # Send START command to Pi at the beginning of the test
+    g.is_running = True  # Set running state to True for testing purposes
     while True:
         ok, frame = cap.read()
         if not ok or frame is None:
@@ -154,6 +156,8 @@ def main():
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
+    forward_command_to_pi("STOP")  # Ensure we send a STOP command to the Pi when exiting
+    g.is_running = False  # Set running state to False when exiting
     cap.release()
     cv2.destroyAllWindows()
 
