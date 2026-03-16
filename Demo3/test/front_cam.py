@@ -34,7 +34,7 @@ def main():
 
     print("[TEST] Loading front CV models...")
 
-    device = choose_device('cpu')
+    device = choose_device(DEFAULT_DEVICE)
 
     cfg = Config.fromfile(resolve_path(DEFAULT_CONFIG))
     lane_model = build_net(cfg)
