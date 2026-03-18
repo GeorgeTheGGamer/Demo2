@@ -5,9 +5,7 @@ import { useTTS } from '../hooks/useTTS';
 import { useVoiceCommand } from '../hooks/useVoiceCommand';
 import { VoiceListeningOverlay } from '../components/VoiceListeningOverlay';
 
-const LAPTOP_IP = '192.168.118.173';
-const HTTP_BASE = `http://${LAPTOP_IP}:5050`;
-const WS_URL = `ws://${LAPTOP_IP}:5050/ws/status`;
+import { LAPTOP_IP, HTTP_BASE, WS_URL } from '../constants';
 
 const initialStatus = {
   running: false,
@@ -228,7 +226,7 @@ export default function LiveScreen() {
               </Text>
             </View>
             <Text className="mt-3 text-base leading-6 text-slate-300">
-              Say End, or hold anywhere on the screen for 3 seconds to stop.
+              Say TrackStop, or hold anywhere on the screen for 3 seconds to stop.
             </Text>
           </View>
 
@@ -262,8 +260,8 @@ export default function LiveScreen() {
 
       <VoiceListeningOverlay
         isListening={isSpeechDetected}
-        idleText="Voice control is active. Say End, or hold anywhere for 3 seconds."
-        listeningText="Speech detected. Listening for End."
+        idleText="Voice control is active. Say TrackStop, or hold anywhere for 3 seconds."
+        listeningText="Speech detected. Listening for TrackStop."
       />
     </Pressable>
   );

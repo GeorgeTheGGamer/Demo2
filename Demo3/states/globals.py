@@ -47,6 +47,7 @@ angle_window: deque = deque(maxlen=STEER_VOTE_WINDOW)
 current_threshold = STRAIGHT_THRESHOLD
 front_current_angle = 90.0
 rear_current_angle = 90.0
+last_angle_send_ts = 0.0   # tracks when the last angle packet was sent to Pi
 
 latest_state = {
     'running': False,
@@ -78,12 +79,18 @@ def full_state_reset():
     """
     global steer_candidate, rear_servo_state, angle_window
     global condition_since, latest_front_frame, latest_rear_frame
-    global front_frame_ts, rear_frame_ts, pi_started
+    global front_frame_ts, rear_frame_ts, pi_started, last_angle_send_ts
+    global left_out_since, right_out_since
+    global front_current_angle, rear_current_angle, state, current_threshold
 
     # Steering
     steer_candidate  = {'servo': None, 'since': 0.0}
     rear_servo_state = {'servo': 90, 'last_seen': 0.0}
     angle_window.clear()
+    front_current_angle = 90.0
+    rear_current_angle  = 90.0
+    state = 'STRAIGHT'
+    current_threshold = STRAIGHT_THRESHOLD
 
     # Stop condition hold timers
     condition_since.clear()
@@ -96,13 +103,23 @@ def full_state_reset():
 
     # Pi handshake — force re-START on next run
     pi_started = False
+    last_angle_send_ts = 0.0
+
+    # Belt debounce timers — reset so next run starts clean
+    left_out_since  = None
+    right_out_since = None
 
 def reset_steering_to_default():
     """Send both servos back to 90° (straight) and clear steering hold-timer state."""
     global steer_candidate, rear_servo_state, angle_window
+    global front_current_angle, rear_current_angle, state, current_threshold
     steer_candidate  = {'servo': None, 'since': 0.0}
     rear_servo_state = {'servo': 90, 'last_seen': 0.0}
     angle_window.clear()
+    front_current_angle = 90.0
+    rear_current_angle  = 90.0
+    state = 'STRAIGHT'
+    current_threshold = STRAIGHT_THRESHOLD
     body = "FRONT_ANGLE=90,REAR_ANGLE=90"
     for pi_ip in PI_IPS:
         print(f"[PI STEER] RESET -> {body} -> {pi_ip}:{PI_CMD_PORT}")

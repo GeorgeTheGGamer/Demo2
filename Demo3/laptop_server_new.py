@@ -54,9 +54,9 @@ def main():
         with torch.inference_mode():
             out_dummy = lane_model({'img': dummy})
             _ = lane_model.heads.get_lanes(out_dummy)[0]
-        print('[CV] ✅ Synthetic warmup complete — MPS kernels compiled')
+        print('[CV] Synthetic warmup complete -- MPS kernels compiled')
     except Exception as e:
-        print(f'[CV] ⚠️  Synthetic warmup failed (non-fatal): {e}')
+        print(f'[CV] Synthetic warmup failed (non-fatal): {e}')
 
     # --- 3. Start Background Threads ---
     threading.Thread(target=run_tcp_server, daemon=True).start()
@@ -70,7 +70,30 @@ def main():
     cached_front_objects = []
     front_placeholder = make_placeholder_frame('Front AI Camera')
     rear_placeholder = make_placeholder_frame('Rear Backup Camera')
-    print("[SERVER] 🖥️ Displaying video feeds. Press 'q' to quit.")
+
+    # --- Position CV display windows: front at top-left, rear below it ---
+    cv2.namedWindow("Front AI Camera", cv2.WINDOW_NORMAL)
+    cv2.namedWindow("Rear Backup Camera", cv2.WINDOW_NORMAL)
+    cv2.moveWindow("Front AI Camera", 0, 0)
+    cv2.moveWindow("Rear Backup Camera", 0, front_placeholder.shape[0] + 40)
+
+    print("[SERVER] Displaying video feeds. Press 'q' to quit.")
+
+    # Hold-time thresholds — defined once, never change at runtime
+    FRONT_HOLD = {
+        'If object is in lane':     HOLD_OBJECT_IN_LANE_SEC,
+        'Corner Angle too extreme': HOLD_CORNER_ANGLE_SEC,
+        'No lane Detected':         HOLD_FRONT_NO_LANE_SEC,
+        'Robot out of lane':        HOLD_FRONT_OUT_LANE_SEC,
+    }
+    REAR_HOLD = {
+        'Left foot out':    HOLD_LEFT_FOOT_SEC,
+        'Right foot out':   HOLD_RIGHT_FOOT_SEC,
+        'Both feet out':    HOLD_BOTH_FEET_SEC,
+        'No feet detected': HOLD_NO_FEET_SEC,
+        'No lane Detected': HOLD_REAR_NO_LANE_SEC,
+        'Robot out of lane':HOLD_REAR_OUT_LANE_SEC,
+    }
 
     while True:
         # --- 5. Frame Acquisition ---
@@ -89,9 +112,9 @@ def main():
                     _ = lane_model.heads.get_lanes(out_w)[0]
                 g.cv_ready = True
                 g.cv_ready_event.set()
-                print('[CV] ✅ CV is ready — robot can now be started from the app')
+                print('[CV] CV is ready -- robot can now be started from the app')
             except Exception as e:
-                print(f'[CV] ⚠️  Warmup inference failed: {e}')
+                print(f'[CV] Warmup inference failed: {e}')
 
         # --- 7. Condition Lists Reset ---
         front_stop_conditions = []
@@ -133,7 +156,7 @@ def main():
                     lanes_xy_front,
                     vis_front.shape,
                     front_yolo.names if hasattr(front_yolo, 'names') else None,
-                    close_ratio=0.7,
+                    close_ratio=0.6,
                 )
                 if len(front_detection_output['danger']) > 0:
                     front_stop_conditions.append('If object is in lane')
@@ -141,18 +164,17 @@ def main():
                     front_stop_conditions.append('No lane Detected')
                     front_stop_conditions.append('Robot out of lane')
 
-                # 8e. Steering angle calculation
-                steer_helper = None
-                if g.state == 'STRAIGHT':
-                    steer_helper = SteeringHelper(lanes_xy_front, vis_front.shape[:2], n_samples=20)
-                if g.state == 'LEFT' or g.state == 'RIGHT':
-                    steer_helper = SteeringHelper(lanes_xy_front, vis_front.shape[:2], n_samples=20)
-                steer_angle = max(min(steer_helper.heading_angle, MINMAX_ANGLE), MINMAX_ANGLE)
+                # Build steering helper regardless of state
+                steer_helper = SteeringHelper(lanes_xy_front, vis_front.shape[:2], n_samples=20)
+                steer_angle = max(min(steer_helper.heading_angle, MINMAX_ANGLE), -MINMAX_ANGLE)
                 latest_angle_deg = round(steer_angle, 1)
+
+                # Draw heading arrow on front camera
+                visualize_front(vis_front, steer_helper.center_points, math.radians(steer_angle))
 
                 # 8f. Update front state
                 robot_status = 'OUT_OF_LANE' if len(lanes_xy_front) == 0 else 'NORMAL'
-                if abs(steer_helper.heading_angle) >= math.radians(70):
+                if abs(steer_helper.heading_angle) >= 70:
                     robot_status = 'LARGE_ANGLE'
                     front_stop_conditions.append('Corner Angle too extreme')
 
@@ -185,11 +207,15 @@ def main():
                 ankles = get_ankles(vis_rear.copy(), rear_pose)
                 ankle_focus.update_frame_size(vis_rear.shape[1], vis_rear.shape[0])
                 left_ankle, right_ankle = ankle_focus.focus(ankles)
-                draw_ankle_point(vis_rear, left_ankle, (0, 255, 255), 'L ankle')
-                draw_ankle_point(vis_rear, right_ankle, (255, 0, 255), 'R ankle')
+                draw_ankle_point(vis_rear, normalize_point(left_ankle),  (0, 255, 255), 'L ankle')
+                draw_ankle_point(vis_rear, normalize_point(right_ankle), (255, 0, 255), 'R ankle')
 
                 # 9d. Rear angle calculation
-                midpoint = calculate_midpoint(left_ankle, right_ankle)
+                # Normalize first so undetected (0,0) YOLO tensors become None,
+                # preventing calculate_midpoint from producing a skewed midpoint.
+                _l_norm = normalize_point(left_ankle)
+                _r_norm = normalize_point(right_ankle)
+                midpoint = calculate_midpoint(_l_norm, _r_norm)
                 draw_ankle_point(vis_rear, normalize_point(midpoint), (255, 255, 0), 'M')
                 angle_rear = calculate_angle_to_center(midpoint, vis_rear)
                 visualize_rear(vis_rear, angle_rear)
@@ -224,24 +250,9 @@ def main():
                     vis_rear = cv2.resize(vis_rear, (rear.shape[1], rear.shape[0]), interpolation=cv2.INTER_LINEAR)
                 rear_display = vis_rear
 
-            combined_stop_conditions = front_stop_conditions + rear_stop_conditions
 
             # --- 10. Hold-Time Stop Condition Evaluation ---
             # A condition must be continuously active for its hold duration before STOP fires.
-            FRONT_HOLD = {
-                'If object is in lane':     HOLD_OBJECT_IN_LANE_SEC,
-                'Corner Angle too extreme': HOLD_CORNER_ANGLE_SEC,
-                'No lane Detected':         HOLD_FRONT_NO_LANE_SEC,
-                'Robot out of lane':        HOLD_FRONT_OUT_LANE_SEC,
-            }
-            REAR_HOLD = {
-                'Left foot out':    HOLD_LEFT_FOOT_SEC,
-                'Right foot out':   HOLD_RIGHT_FOOT_SEC,
-                'Both feet out':    HOLD_BOTH_FEET_SEC,
-                'No feet detected': HOLD_NO_FEET_SEC,
-                'No lane Detected': HOLD_REAR_NO_LANE_SEC,
-                'Robot out of lane':HOLD_REAR_OUT_LANE_SEC,
-            }
 
             now = time.time()
             actuator_stop_conditions = []
@@ -283,7 +294,7 @@ def main():
 
             # --- 12. Send Steering Commands ---
             # Forward angle commands to Pi only if still running after condition check.
-            if g.is_running:
+            if g.is_running and front is not None:
                 send_angles_to_pi(latest_angle_deg, rear_servo_val)
 
             # --- 13. Broadcast Status & Display ---

@@ -93,10 +93,10 @@ class PiBridge:
         try:
             arduino = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
             time.sleep(2)
-            print(f'[PI] ✅ Connected to Arduino on {SERIAL_PORT}')
+            print(f'[PI] Connected to Arduino on {SERIAL_PORT}')
             return arduino
         except Exception as e:
-            print(f'[PI] ⚠️ Arduino serial unavailable: {e}')
+            print(f'[PI] Arduino serial unavailable: {e}')
             return None
 
     def _write_arduino(self, msg):
@@ -139,7 +139,7 @@ class PiBridge:
                     self.tx_rear.sendto(buf_r, (LAPTOP_IP, REAR_PORT))
 
     def _unified_listener(self):
-        print(f'[PI] 🎧 Listening for System Commands and CV Control on port {CMD_PORT}')
+        print(f'[PI] Listening for System Commands and CV Control on port {CMD_PORT}')
         while self.running:
             try:
                 data, _ = self.cmd_sock.recvfrom(1024)

@@ -75,20 +75,19 @@ export function useVoiceCommand({
         return;
       }
 
-      const words = normalized.split(' ');
-      const hasBegin = words.includes('begin');
-      const hasEnd = words.includes('end');
+      const hasTrackGo   = normalized.includes('trackgo')   || normalized.includes('track go');
+      const hasTrackStop  = normalized.includes('trackstop')  || normalized.includes('track stop');
 
-      if (hasBegin) {
+      if (hasTrackGo) {
         lastCommandAtRef.current = now;
-        speakWithInterrupt('Begin command received');
+        speakWithInterrupt('Track go command received');
         onStartCommand?.();
         return;
       }
 
-      if (hasEnd) {
+      if (hasTrackStop) {
         lastCommandAtRef.current = now;
-        speakWithInterrupt('End command received');
+        speakWithInterrupt('Track stop command received');
         onStopCommand?.();
         return;
       }
@@ -121,7 +120,7 @@ export function useVoiceCommand({
 
   useSpeechRecognitionEvent('nomatch', () => {
     if (!alwaysListening) {
-      speak('Command not recognised. Say Begin to start and End to stop.');
+      speak('Command not recognised. Say Track Go to start and Track Stop to stop.');
     }
   });
 
@@ -136,7 +135,7 @@ export function useVoiceCommand({
 
     if (event?.error === 'no-speech') {
       if (!alwaysListening) {
-        speak('No speech detected. Say Begin to start and End to stop.');
+        speak('No speech detected. Say Track Go to start and Track Stop to stop.');
       }
       return;
     }
@@ -195,7 +194,7 @@ export function useVoiceCommand({
       }
 
       if (withPrompt) {
-        speak('Listening. Say Begin to start and End to stop.');
+        speak('Listening. Say Track Go to start and Track Stop to stop.');
       }
 
       ExpoSpeechRecognitionModule.start({
@@ -204,7 +203,7 @@ export function useVoiceCommand({
         maxAlternatives: 1,
         continuous: alwaysListening,
         requiresOnDeviceRecognition: false,
-        contextualStrings: ['Begin', 'End', 'TrackSense'],
+        contextualStrings: ['TrackGo', 'TrackStop', 'TrackSense'],
         iosTaskHint: 'confirmation',
         iosVoiceProcessingEnabled: true,
         androidIntentOptions: {

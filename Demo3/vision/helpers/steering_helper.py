@@ -137,7 +137,7 @@ class SteeringHelper:
         center_points are sampled from y_min (near horizon) to y_max (near car),
         so idx2 > idx1 means the vector points from horizon toward the car.
         To express "forward" direction (car → horizon), we negate the vector.
-        return: heading angle in radians, where 0 means straight ahead,
+        return: heading angle in degrees, where 0 means straight ahead,
         positive is left turn, negative is right turn.
         if angle is smaller than threshold, return 0 to avoid noise.
         """
@@ -146,7 +146,8 @@ class SteeringHelper:
             return 0.0
 
         # New logic: use the center bottom point and the top point to calculate the heading angle.
-        x1, y1 = self.center_points[-5] # top point (horizon)
+        horizon_idx = max(0, len(self.center_points) - 5)
+        x1, y1 = self.center_points[horizon_idx]  # near-horizon point (safe regardless of n_samples)
         x2, y2 = self.frame_width/2, self.frame_height # bottom point (representing car position)
 
         dx = x1 - x2
@@ -181,7 +182,7 @@ def angle_deg_to_servo_held(angle_deg: float) -> Optional[float]:
     if len(g.angle_window) < STEER_VOTE_WINDOW:
         return None # not enough data yet
 
-    tail = list(g.angle_window)[-STEER_VOTE_THRESHOLD:]
+    tail = list(g.angle_window)[-STEER_VOTE_WINDOW:]
 
     growing   = sum(1 for v in tail if abs(v) > abs(tail[0]))
     shrinking = sum(1 for v in tail if abs(v) < abs(tail[0]))

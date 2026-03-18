@@ -4,6 +4,7 @@ import { Alert, Pressable, ScrollView, Text, TouchableOpacity, View } from 'reac
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTTS } from '../hooks/useTTS';
 import { useVoiceCommand } from '../hooks/useVoiceCommand';
+import { LAPTOP_IP, HTTP_BASE } from '../constants';
 import { VoiceListeningOverlay } from '../components/VoiceListeningOverlay';
 
 export default function App() {
@@ -26,11 +27,9 @@ export default function App() {
     }
   }, [stopReason]);
 
-  // Hardcoded IP - will probably need to change
-  const LAPTOP_IP = '192.168.118.173'; 
 
   async function handleStart() {
-    const url = `http://${LAPTOP_IP}:5050/command`;
+    const url = `${HTTP_BASE}/command`;
     speak('Starting robot');
     try {
       // Send the POST request to your Laptop's Flask server
@@ -53,7 +52,7 @@ export default function App() {
   }
 
   async function handleStop() {
-    const url = `http://${LAPTOP_IP}:5050/command`;
+    const url = `${HTTP_BASE}/command`;
     speak('Stopping robot');
     try {
       const response = await fetch(url, {
@@ -112,7 +111,7 @@ export default function App() {
             </Text>
 
             <Text className="text-lg leading-7 text-slate-400">
-              Voice control is always listening. Say Begin to start or End to stop.
+              Voice control is always listening. Say TrackGo to start or TrackStop to stop.
             </Text>
           </View>
 
@@ -120,7 +119,7 @@ export default function App() {
             <View className="rounded-[36px] border border-white/10 bg-slate-900 px-7 py-8 shadow-lg">
               <Text className="text-center text-3xl font-bold leading-10 text-white">Tap Anywhere to Start</Text>
               <Text className="mt-4 text-center text-lg leading-8 text-slate-300">
-                Say Begin to start or End to stop.
+                Say TrackGo to start or TrackStop to stop.
               </Text>
             </View>
           </View>
@@ -129,8 +128,8 @@ export default function App() {
 
       <VoiceListeningOverlay
         isListening={isSpeechDetected}
-        idleText="Voice control is active. Say Begin to start or End to stop."
-        listeningText="Speech detected. Listening for Begin or End."
+        idleText="Voice control is active. Say TrackGo to start or TrackStop to stop."
+        listeningText="Speech detected. Listening for TrackGo or TrackStop."
       />
     </Pressable>
   );

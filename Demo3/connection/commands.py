@@ -56,7 +56,7 @@ def broadcast_status(force=False):
 
 def forward_command_to_pi(command):
     """Forward START/STOP command to all configured Pi IPs."""
-    payload = f"{command}\n".encode('utf-8')
+    payload = f"{command}\n\n".encode('utf-8')
     for pi_ip in PI_IPS:
         print(f"[PI CMD] {command} -> {pi_ip}:{PI_CMD_PORT}")
         g.tx_socket.sendto(payload, (pi_ip, PI_CMD_PORT))
@@ -71,7 +71,7 @@ def receive_command():
         g.is_running = True
         g.pi_started = False
         g.condition_since = {}
-        print('📱 APP SAYS START: CV started locally — Pi will be notified on first angle')
+        print('APP SAYS START: CV started locally -- Pi will be notified on first angle')
         with g.state_lock:
             g.latest_state['running'] = True
         broadcast_status(force=True)
@@ -79,7 +79,7 @@ def receive_command():
 
     if command == 'STOP':
         g.is_running = False
-        print('📱 APP SAYS STOP: Forwarding to Pi...')
+        print('APP SAYS STOP: Forwarding to Pi...')
         forward_command_to_pi('STOP')
         g.reset_steering_to_default()
         g.full_state_reset()
@@ -119,7 +119,7 @@ def run_tcp_server():
 def receive_rear_video():
     udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp_sock.bind((HOST_IP, REAR_PORT))
-    print(f"[SERVER] 🟢 Listening for REAR camera on port {REAR_PORT}")
+    print(f"[SERVER] Listening for REAR camera on port {REAR_PORT}")
     while True:
         try:
             data, _ = udp_sock.recvfrom(MAX_DGRAM)
@@ -134,7 +134,7 @@ def receive_rear_video():
 def receive_front_video():
     udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp_sock.bind((HOST_IP, FRONT_PORT))
-    print(f"[SERVER] 🔵 Listening for FRONT camera on port {FRONT_PORT}")
+    print(f"[SERVER] Listening for FRONT camera on port {FRONT_PORT}")
     while True:
         try:
             data, _ = udp_sock.recvfrom(MAX_DGRAM)
@@ -151,9 +151,15 @@ def send_angles_to_pi(angle_front, rear_servo=90):
     if not g.is_running:
         return
 
+    # Rate-limit: send at most ANGLE_SEND_HZ packets per second.
+    now = time.time()
+    if (now - g.last_angle_send_ts) < (1.0 / ANGLE_SEND_HZ):
+        return
+    g.last_angle_send_ts = now
+
     # On the very first angle of a run, send START to Pi first so it is ready to move.
     if not g.pi_started:
-        print('[PI CMD] First angle computed — sending START to Pi now')
+        print('[PI CMD] First angle computed -- sending START to Pi now')
         forward_command_to_pi('START')
         g.pi_started = True
 
@@ -172,7 +178,7 @@ def send_angles_to_pi(angle_front, rear_servo=90):
         if abs(g.front_current_angle - 90) <= STRAIGHT_THRESHOLD:
             g.state = 'STRAIGHT'
 
-    g.rear_current_angle = g.front_current_angle + rear_servo
+    g.rear_current_angle = float(rear_servo)  # absolute servo position, independent of front
     # Clamp rear angle to 90 +/- MINMAX
     min_angle = 90 - MINMAX_ANGLE
     max_angle = 90 + MINMAX_ANGLE
@@ -181,6 +187,7 @@ def send_angles_to_pi(angle_front, rear_servo=90):
     front_int = round(g.front_current_angle)
     rear_int = round(g.rear_current_angle)
     body = f"FRONT_ANGLE={front_int},REAR_ANGLE={rear_int}"
+    payload = f"{body}\n\n".encode('utf-8')
     for pi_ip in PI_IPS:
-            print(f"[PI STEER] {body} (front={angle_front:.2f}°, rear_servo={rear_servo}) -> {pi_ip}:{PI_CMD_PORT}")
-            g.tx_socket.sendto(body.encode('utf-8'), (pi_ip, PI_CMD_PORT))
+        print(f"[PI STEER] {body} (front={angle_front:.2f}°, rear_servo={rear_servo}) -> {pi_ip}:{PI_CMD_PORT}")
+        g.tx_socket.sendto(payload, (pi_ip, PI_CMD_PORT))

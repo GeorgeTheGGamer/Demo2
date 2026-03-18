@@ -94,11 +94,14 @@ def main():
         ankles = get_ankles(vis_rear.copy(), rear_pose)
         ankle_focus.update_frame_size(vis_rear.shape[1], vis_rear.shape[0])
         left_ankle, right_ankle = ankle_focus.focus(ankles)
-        draw_ankle_point(vis_rear, left_ankle, (0, 255, 255), "L ankle")
-        draw_ankle_point(vis_rear, right_ankle, (255, 0, 255), "R ankle")
+        draw_ankle_point(vis_rear, normalize_point(left_ankle),  (0, 255, 255), "L ankle")
+        draw_ankle_point(vis_rear, normalize_point(right_ankle), (255, 0, 255), "R ankle")
 
         # 4) Rear angle + visualization
-        midpoint = calculate_midpoint(left_ankle, right_ankle)
+        # Normalize first so undetected (0,0) YOLO tensors become None
+        _l_norm = normalize_point(left_ankle)
+        _r_norm = normalize_point(right_ankle)
+        midpoint = calculate_midpoint(_l_norm, _r_norm)
         draw_ankle_point(vis_rear, normalize_point(midpoint), (255, 255, 0), "M")
         angle_rear = calculate_angle_to_center(midpoint, vis_rear)
         visualize_rear(vis_rear, angle_rear)

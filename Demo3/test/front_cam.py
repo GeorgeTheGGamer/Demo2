@@ -103,7 +103,7 @@ def main():
             lanes_xy_front,
             vis_front.shape,
             front_yolo.names if hasattr(front_yolo, "names") else None,
-            close_ratio=0.7,
+            close_ratio=0.6,
         )
         if len(front_detection_output.get("danger", [])) > 0:
             front_stop_conditions.append("If object is in lane")
@@ -117,7 +117,7 @@ def main():
         latest_angle_deg = round(steer_angle, 1)
 
         robot_status = "OUT_OF_LANE" if len(lanes_xy_front) == 0 else "NORMAL"
-        if abs(steer_helper.heading_angle) >= math.radians(70):
+        if abs(steer_helper.heading_angle) >= 70:
             robot_status = "LARGE_ANGLE"
             front_stop_conditions.append("Corner Angle too extreme")
 

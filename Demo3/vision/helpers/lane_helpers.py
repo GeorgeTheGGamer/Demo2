@@ -48,9 +48,14 @@ def is_point_in_lane(pt, lanes_xy):
     return False
 
 def normalize_point(pt):
-    """Convert a point from tensor to (x, y) tuple of floats, or return None if input is None."""
+    """Convert a point from tensor to (x, y) tuple of floats, or return None if input is None or undetected.
+    YOLO returns [0.0, 0.0] for keypoints it cannot localise — treat these as missing.
+    """
     if pt is None:
         return None
-    return float(pt[0]), float(pt[1])
+    x, y = float(pt[0]), float(pt[1])
+    if x == 0.0 and y == 0.0:
+        return None  # Undetected YOLO keypoint — not a real position
+    return x, y
 
 
