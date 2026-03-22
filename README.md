@@ -1,146 +1,72 @@
-# TrackSense (Demo2)
+# TrackSense
 
 Real-time lane, object, and rear foot safety monitoring for a mobile robot.
 
-This project uses:
-- **Laptop server** for AI inference, local CV display, control API, and live status streaming
-- **Raspberry Pi client** for dual camera streaming + Arduino bridge
-- **Mobile app** (React Native/Expo, in a sibling folder) for START/STOP and live telemetry
+TrackSense is an autonomous running companion system that pairs a mobile robot with an iOS/Android App. The robot provides live CV analysis (lane detection, object avoidance, foot tracking) and the mobile app provides live GPS tracking, telemetry, voice control, and automatic Strava uploads.
 
 ---
 
-## Features
+## 🚀 Key Features
 
-- Front camera lane detection + steering angle estimation
-- Front object detection overlays (lane-aware box filtering)
-- Rear camera lane + ankle/foot safety status
-- Two local OpenCV windows on laptop (front + rear)
-- App control via REST (`START` / `STOP`)
-- Live status updates via WebSocket and `/status` endpoint
-- UDP command forwarding to Pi and serial forwarding to Arduino
-**
----
+### 🤖 Robot Intelligence (AI/CV)
+- **Front Camera**: Live lane detection and steering angle estimation to stay on paths.
+- **Object Detection**: YOLOv8n object detection with lane-aware bounding boxes to warn of upcoming hazards.
+- **Rear Camera**: Ankle/foot tracking to ensure the robot stays ahead of the runner safely.
+- **ROS Integration**: Modular architecture using ROS nodes for sensors and motor controllers.
 
-## Repository Structure
-
-- `main.py` – project entry helper (if used)
-- `tools/YOLOv8n/laptop_server.py` – central AI + API + display server
-- `tools/YOLOv8n/pi_client.py` – Pi dual-stream sender + command listener
-- `tools/YOLOv8n/objectDetector.py` – object detection helper
-- `tools/YOLOv8n/poseDetector.py` – pose/ankle helper
-- `tools/helper/steering_helper.py` – steering angle utilities
-- `clrnet/` + `configs/` + `checkpoints/` – lane model code/config/weights
+### 📱 Mobile App (React Native/Expo)
+- **Live Telemetry & GPS Tracking**: Real-time map viewport locked to the user's location, with distance and pace calculations (includes anti-drift jitter filtering).
+- **Voice Control**: "TrackGo" and "TrackStop" voice commands with robust debouncing to navigate menus completely hands-free.
+- **Strava Integration**: Built-in Strava OAuth support securely saves tokens (`expo-secure-store`). Automatically generates GPX files of the run and uploads them directly to your Strava profile natively. 
+- **Gestures**: "Hold-to-Stop" gesture anywhere on the screen for 3 seconds guarantees an easy stop without needing to look at small buttons.
 
 ---
 
-## Network & Ports
+## 📂 Repository Structure
 
-Default values in code:
-
-- Laptop API host: `0.0.0.0`
-- Laptop API port: `5050`
-- Front frame UDP port: `8000`
-- Rear frame UDP port: `8002`
-- Pi command UDP port: `8001`
-- Laptop IP used by app/Pi: `192.168.8.173`
-- Pi IP targets in laptop server: `192.168.8.199`, `172.17.0.1`
-
-If your network is different, update:
-- `tools/YOLOv8n/laptop_server.py`
-- `tools/YOLOv8n/pi_client.py`
-- app endpoints in your Expo app
+- `Demo3/laptop_server.py` – Central AI inference server, Flask API, and WebSocket server.
+- `SDP_TrackSense_App/` – The React Native/Expo mobile app source code.
+- `ros/` – ROS Nodes (`arduino_node.py`, `bridge_node.py`, `front_camera_node.py`, `rear_camera_node.py`).
+- `arduino/arduino.ino` – The serial bridge script for the motor controller.
+- `tools/helper/` & `clrnet/` – Model weights and steering calculation utilities.
 
 ---
 
-## Requirements
+## ⚙️ Setup Instructions
 
-Use the provided requirements file for your OS:
+### 1. Laptop Server (AI Core)
+1. Install dependencies from `requirements_mac.txt` or `requirements_windows.txt`.
+2. Ensure model files exist in `checkpoints/`.
+3. Run the AI server:
+   ```bash
+   python3 Demo3/laptop_server.py
+   ```
+   *(This launches the Flask instance on port `5050` and listens for UDP frames on `8000/8002`)*
 
-- macOS: `requirements_mac.txt`
-- Windows: `requirements_windows.txt`
+### 2. Mobile App
+1. Navigate to the App directory: `cd SDP_TrackSense_App`
+2. Configure Strava API credentials:
+   Create a `.env` file containing:
+   ```env
+   EXPO_PUBLIC_STRAVA_CLIENT_ID="your_id"
+   EXPO_PUBLIC_STRAVA_CLIENT_SECRET="your_secret"
+   ```
+3. Start the Expo bundler:
+   ```bash
+   npx expo start --dev-client
+   ```
+   *(To test on a physical iOS device natively, use `npx expo run:ios -d` via Xcode if you encounter `devicectl` bugs).*
 
-Python 3.9+ recommended.
-
----
-
-## Setup (Laptop)
-
-1. Create and activate a virtual environment.
-2. Install dependencies from your OS requirements file.
-3. Ensure model files exist:
-	- `checkpoints/tusimple_r18.pth`
-	- `checkpoints/yolov8n_int8.tflite`
-	- `checkpoints/yolov8n-pose_int8.tflite`
-4. Run:
-
-	`python3 tools/YOLOv8n/laptop_server.py`
-
-Expected startup includes:
-- front/rear UDP listeners
-- Flask server at `http://<laptop-ip>:5050`
-- OpenCV windows for front and rear feeds
-
----
-
-## Setup (Raspberry Pi)
-
-1. Connect cameras (`/dev/video0`, `/dev/video2` by default).
-2. Connect Arduino serial (`/dev/ttyACM0` by default).
-3. Ensure laptop IP in `pi_client.py` matches your laptop.
-4. Run:
-
-	`python3 tools/YOLOv8n/pi_client.py`
-
-Pi waits for `START` command, then streams frames to laptop.
+### 3. Robot/Raspberry Pi
+1. Run the ROS nodes or Pi streaming clients (`tools/YOLOv8n/pi_client.py`).
+2. Flash the `arduino/arduino.ino` to the motor controller to handle incoming serial directions.
 
 ---
 
-## Mobile App Flow
+## 📡 Networking & Ports
+- **Laptop API host**: `0.0.0.0:5050`
+- **Front frame UDP port**: `8000`
+- **Rear frame UDP port**: `8002`
+- **REST & WebSockets**: App connects via `/status` and `/command`.
 
-From the Expo app:
-1. Press **START**
-2. Laptop forwards START to Pi
-3. Pi enables streaming
-4. Laptop runs CV, shows overlays in both windows, and sends telemetry to app
-5. Press **STOP** to stop robot streaming/control flow
-
----
-
-## Runtime Behavior Notes
-
-- Laptop keeps local windows visible (idle + running modes)
-- Steering messages are sent as plain text: `ANGLE=<value>`
-- START/STOP are plain commands over UDP to Pi
-- App receives combined front/rear JSON state from laptop
-
----
-
-## Troubleshooting
-
-### 1) `Port 5000 is in use`
-Current server port is `5050`. If you still see 5000 conflicts, another process/version is being run. Confirm you are launching the current `laptop_server.py`.
-
-### 2) No feed in laptop windows
-- Verify Pi is running and receives START
-- Check `LAPTOP_IP` in `pi_client.py`
-- Ensure UDP ports `8000`/`8002` are not blocked
-
-### 3) App connects but no live updates
-- Verify app uses `http://<laptop-ip>:5050`
-- Verify WebSocket URL `ws://<laptop-ip>:5050/ws/status`
-- Ensure laptop and phone are on the same network
-
-### 4) Flask imports unresolved in editor
-If IDE shows unresolved import for `flask`/`flask_sock`, verify interpreter selection points to the same virtual environment used to run the project.
-
-### 5) Arduino not receiving commands
-- Confirm serial port (`/dev/ttyACM0`) and baud (`115200`)
-- Check user permissions for serial device
-- Look for `[PI] -> ARDUINO:` logs in Pi terminal
-
----
-
-## Safety
-
-This code is for prototype/testing use. Validate all stop and steering behavior in a controlled environment before real operation.
-
+*Ensure the LAPTOP_IP is correctly matched across `constants.js` in the app and the `pi_client.py` on the robot.*
