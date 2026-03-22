@@ -12,7 +12,9 @@
       "supportsTablet": true,
       "infoPlist": {
         "NSSpeechRecognitionUsageDescription": "Allow TrackSense to use speech recognition for voice commands.",
-        "NSMicrophoneUsageDescription": "Allow TrackSense to use the microphone for voice commands."
+        "NSMicrophoneUsageDescription": "Allow TrackSense to use the microphone for voice commands.",
+        "NSLocationWhenInUseUsageDescription": "Allow TrackSense to track your live runs on the map.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Allow TrackSense to track your live runs even when the app is in the background."
       },
       "bundleIdentifier": "com.anonymous.TrackSense"
     },
@@ -53,6 +55,13 @@
         {
           "microphonePermission": "Allow TrackSense to use the microphone for voice commands.",
           "speechRecognitionPermission": "Allow TrackSense to use speech recognition for voice commands."
+        }
+      ],
+      "expo-secure-store",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow TrackSense to track your live runs on the map."
         }
       ]
     ],

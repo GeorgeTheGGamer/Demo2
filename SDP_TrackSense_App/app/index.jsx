@@ -1,13 +1,16 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { router, useLocalSearchParams } from 'expo-router';
-import { Alert, Pressable, ScrollView, Text, TouchableOpacity, View } from 'react-native';
+import { Alert, Pressable, ScrollView, Switch, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTTS } from '../hooks/useTTS';
 import { useVoiceCommand } from '../hooks/useVoiceCommand';
 import { LAPTOP_IP, HTTP_BASE } from '../constants';
 import { VoiceListeningOverlay } from '../components/VoiceListeningOverlay';
+import { useAuthRequest, makeRedirectUri } from 'expo-auth-session';
+import { STRAVA_CLIENT_ID, STRAVA_SCOPES, discovery, saveAuthTokens, isAuthenticated, clearAuth } from '../services/strava';
 
 export default function App() {
+  const isNavigatingRef = useRef(false);
   const { stopReason } = useLocalSearchParams();
   const insets = useSafeAreaInsets();
   const [banner, setBanner] = useState(stopReason || null);
@@ -19,6 +22,32 @@ export default function App() {
     onStopCommand: handleStop,
   });
 
+  const [isStravaConnected, setIsStravaConnected] = useState(false);
+  const [shouldSaveToStrava, setShouldSaveToStrava] = useState(true);
+  const [request, response, promptAsync] = useAuthRequest(
+    {
+      clientId: STRAVA_CLIENT_ID,
+      scopes: STRAVA_SCOPES,
+      redirectUri: makeRedirectUri({ native: 'tracksense://localhost' }),
+    },
+    discovery
+  );
+
+  useEffect(() => {
+    isAuthenticated().then(setIsStravaConnected);
+  }, []);
+
+  useEffect(() => {
+    if (response?.type === 'success') {
+      saveAuthTokens(response).then(() => setIsStravaConnected(true));
+    }
+  }, [response]);
+
+  async function handleDisconnectStrava() {
+    await clearAuth();
+    setIsStravaConnected(false);
+  }
+
   // Clear banner param from URL after reading so it doesn't persist on re-render
   useEffect(() => {
     if (stopReason) {
@@ -27,8 +56,16 @@ export default function App() {
     }
   }, [stopReason]);
 
+  useEffect(() => {
+    if (!stopReason) {
+      speak('To start, tap the screen, or say Track Go.');
+    }
+  }, []);
+
 
   async function handleStart() {
+    if (isNavigatingRef.current) return; // Prevent double execution
+    isNavigatingRef.current = true;
     const url = `${HTTP_BASE}/command`;
     speak('Starting robot');
     try {
@@ -40,7 +77,7 @@ export default function App() {
       });
 
       if (response.ok) {
-        router.replace('/live');
+        router.replace({ pathname: '/live', params: { saveToStrava: String(shouldSaveToStrava) } });
       } else {
         Alert.alert("Error", "Laptop received the request but something went wrong.");
       }
@@ -122,6 +159,39 @@ export default function App() {
                 Say TrackGo to start or TrackStop to stop.
               </Text>
             </View>
+            
+            <Pressable 
+              onPress={(e) => {
+                e.stopPropagation();
+                if (isStravaConnected) {
+                  handleDisconnectStrava();
+                } else {
+                  promptAsync();
+                }
+              }}
+              className={`rounded-[36px] border px-7 py-5 shadow-lg ${isStravaConnected ? 'border-orange-500/30 bg-orange-500/20' : 'border-white/10 bg-slate-800'}`}
+            >
+              <Text className={`text-center text-xl font-bold leading-8 ${isStravaConnected ? 'text-orange-400' : 'text-white'}`}>
+                {isStravaConnected ? 'Connected to Strava (Tap to Disconnect)' : 'Connect with Strava'}
+              </Text>
+            </Pressable>
+
+            {isStravaConnected && (
+              <View className="mt-4 flex-row items-center justify-between rounded-[36px] border border-slate-800 bg-slate-900 px-6 py-4 shadow-lg">
+                <View className="flex-1 pr-4">
+                  <Text className="text-lg font-bold text-white">Save to Strava</Text>
+                  <Text className="text-sm text-slate-400">Auto-upload run when finished</Text>
+                </View>
+                <Switch
+                  value={shouldSaveToStrava}
+                  onValueChange={setShouldSaveToStrava}
+                  trackColor={{ false: '#334155', true: '#ea580c' }}
+                  thumbColor="#ffffff"
+                />
+              </View>
+            )}
+
+
           </View>
         </View>
       </ScrollView>

@@ -5,7 +5,7 @@ import {
 } from 'expo-speech-recognition';
 import { useTTS } from './useTTS';
 
-const COMMAND_COOLDOWN_MS = 2000;
+const COMMAND_COOLDOWN_MS = 5000;
 const TRANSCRIPT_DEDUPE_MS = 1200;
 const RESTART_DELAY_MS = 900;
 const SPEECH_ACTIVE_RETRY_MS = 900;
@@ -119,9 +119,7 @@ export function useVoiceCommand({
   });
 
   useSpeechRecognitionEvent('nomatch', () => {
-    if (!alwaysListening) {
-      speak('Command not recognised. Say Track Go to start and Track Stop to stop.');
-    }
+    // Suppressed to prevent spam
   });
 
   useSpeechRecognitionEvent('error', (event) => {
@@ -134,9 +132,6 @@ export function useVoiceCommand({
     }
 
     if (event?.error === 'no-speech') {
-      if (!alwaysListening) {
-        speak('No speech detected. Say Track Go to start and Track Stop to stop.');
-      }
       return;
     }
 
@@ -144,8 +139,6 @@ export function useVoiceCommand({
       speakWithInterrupt('Voice commands are unavailable. Check microphone and speech permissions.');
       return;
     }
-
-    speakWithInterrupt('Voice recognition error. Please try again.');
   });
 
   useSpeechRecognitionEvent('end', () => {
@@ -193,9 +186,7 @@ export function useVoiceCommand({
         return;
       }
 
-      if (withPrompt) {
-        speak('Listening. Say Track Go to start and Track Stop to stop.');
-      }
+      // Prompts are now handled directly by the homepage/live screens
 
       ExpoSpeechRecognitionModule.start({
         lang: 'en-US',

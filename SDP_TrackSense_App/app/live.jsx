@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Animated, Easing, Pressable, ScrollView, Text, View } from 'react-native';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useTTS } from '../hooks/useTTS';
 import { useVoiceCommand } from '../hooks/useVoiceCommand';
 import { VoiceListeningOverlay } from '../components/VoiceListeningOverlay';
+import MapView, { Polyline } from 'react-native-maps';
+import { useLocationTracking } from '../hooks/useLocationTracking';
+import { uploadRunToStrava, isAuthenticated } from '../services/strava';
 
 import { LAPTOP_IP, HTTP_BASE, WS_URL } from '../constants';
 
@@ -23,6 +26,7 @@ const initialStatus = {
 };
 
 export default function LiveScreen() {
+  const { saveToStrava } = useLocalSearchParams();
   const [status, setStatus] = useState(initialStatus);
   const [connected, setConnected] = useState(false);
   const [isHoldStopping, setIsHoldStopping] = useState(false);
@@ -41,6 +45,25 @@ export default function LiveScreen() {
   const prevRearStopRef = useRef('None');
   const frontStopTimerRef = useRef(null);
   const rearStopTimerRef = useRef(null);
+  const pointerTimerRef = useRef(null);
+
+  const { coordinates, distance, hasPermission } = useLocationTracking(!stopTriggeredRef.current);
+  const [startTime] = useState(Date.now());
+  const [elapsedMs, setElapsedMs] = useState(0);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (!stopTriggeredRef.current) {
+        setElapsedMs(Date.now() - startTime);
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const formattedTime = new Date(elapsedMs).toISOString().substring(11, 19);
+  const formattedDistance = (distance / 1000).toFixed(2);
+  const pace = distance > 0 ? (elapsedMs / 1000 / 60) / (distance / 1000) : 0;
+  const formattedPace = pace > 0 ? `${Math.floor(pace)}:${Math.floor((pace % 1) * 60).toString().padStart(2, '0')}` : '0:00';
 
   const frontWarningText = useMemo(() => (status.front.object_detection.warning || []).join(', ') || 'None', [status]);
   const frontDangerText = useMemo(() => (status.front.object_detection.danger || []).join(', ') || 'None', [status]);
@@ -48,6 +71,10 @@ export default function LiveScreen() {
   const rearWarningText = useMemo(() => (status.rear.object_detection.warning || []).join(', ') || 'None', [status]);
   const rearDangerText = useMemo(() => (status.rear.object_detection.danger || []).join(', ') || 'None', [status]);
   const rearStopText = useMemo(() => (status.rear.stop_conditions || []).join(', ') || 'None', [status]);
+
+  useEffect(() => {
+    speak('To stop, hold the screen for 3 seconds, or say Track Stop.');
+  }, []);
 
   // Announce stop condition changes via TTS after 3 s of stability
   useEffect(() => {
@@ -116,7 +143,7 @@ export default function LiveScreen() {
     };
 
     ws.onerror = (event) => {
-      console.error(event);
+      // Ignore offline errors in the UI
     };
 
     ws.onclose = () => {
@@ -135,6 +162,7 @@ export default function LiveScreen() {
   }, []);
 
   async function handleStop() {
+    if (stopTriggeredRef.current) return; // Prevent duplicate rapid executions
     const allStopConditions = [
       ...(status.front.stop_conditions || []),
       ...(status.rear.stop_conditions || []),
@@ -143,7 +171,18 @@ export default function LiveScreen() {
 
     stopTriggeredRef.current = true;
     setIsHoldStopping(true);
-    speak('Stopping robot');
+    speak('Stopping robot and finishing run');
+
+    // Attempt Strava upload directly if saving is enabled
+    try {
+      const isStrava = await isAuthenticated();
+      if (isStrava && coordinates.length > 0 && saveToStrava !== 'false') {
+        await uploadRunToStrava(coordinates, elapsedMs, distance);
+      }
+    } catch (err) {
+      console.error('Strava upload failed', err);
+    }
+
     try {
       const response = await fetch(`${HTTP_BASE}/command`, {
         method: 'POST',
@@ -169,6 +208,8 @@ export default function LiveScreen() {
     }
   }
 
+
+
   function beginHoldToStop() {
     stopTriggeredRef.current = false;
     setIsHoldStopping(true);
@@ -176,7 +217,7 @@ export default function LiveScreen() {
     holdProgress.setValue(0);
     Animated.timing(holdProgress, {
       toValue: 1,
-      duration: 3000,
+      duration: 1000, // 1s visual + 2s delayPressIn = 3s total hold
       easing: Easing.linear,
       useNativeDriver: true,
     }).start();
@@ -199,25 +240,29 @@ export default function LiveScreen() {
 
 
   return (
-    <Pressable
-      className="flex-1 bg-slate-950"
-      onPressIn={beginHoldToStop}
-      onPressOut={cancelHoldToStop}
-      onLongPress={handleStop}
-      delayLongPress={3000}
-    >
+    <View className="flex-1 bg-slate-950">
       <Animated.View
         pointerEvents="none"
-        style={{ opacity: holdProgress }}
-        className="absolute inset-0 bg-orange-500/85"
-      />
+        style={{ opacity: holdProgress, zIndex: 50 }}
+        className="absolute inset-0 bg-orange-600/95 items-center justify-center p-8"
+      >
+        <Text className="text-4xl font-bold text-white text-center">Keep Holding...</Text>
+        <Text className="text-xl font-semibold text-orange-200 text-center mt-4">Release to cancel</Text>
+      </Animated.View>
 
       <ScrollView
         className="flex-1"
-        contentContainerStyle={{ paddingTop: 56, paddingBottom: 120, paddingHorizontal: 20 }}
         showsVerticalScrollIndicator={false}
       >
-        <View className="gap-6">
+        <Pressable
+          style={{ minHeight: '100%', paddingTop: 56, paddingBottom: 120, paddingHorizontal: 20 }}
+          delayPressIn={2000}
+          delayLongPress={3000}
+          onPressIn={beginHoldToStop}
+          onPressOut={cancelHoldToStop}
+          onLongPress={handleStop}
+        >
+          <View className="gap-6">
           <View className="px-1">
             <View className="flex-row items-center justify-between gap-4">
               <Text className="text-3xl font-bold tracking-tight text-white">Status</Text>
@@ -230,15 +275,56 @@ export default function LiveScreen() {
             </Text>
           </View>
 
-
-          {isHoldStopping && !stopTriggeredRef.current && (
-            <View className="rounded-[32px] border border-orange-300/30 bg-orange-500/15 px-6 py-5">
-              <Text className="text-2xl font-bold text-white">Keep Holding to Stop</Text>
-              <Text className="mt-2 text-lg leading-7 text-orange-100">
-                Release to cancel. Keep holding until the screen becomes solid orange.
-              </Text>
+          <View className="flex-row justify-between rounded-[32px] border border-slate-800 bg-slate-900 px-6 py-5">
+            <View>
+              <Text className="text-sm font-semibold text-slate-400">Time</Text>
+              <Text className="text-2xl font-bold text-white tracking-widest">{formattedTime}</Text>
             </View>
-          )}
+            <View>
+              <Text className="text-sm font-semibold text-slate-400">Distance</Text>
+              <Text className="text-2xl font-bold text-white">{formattedDistance} km</Text>
+            </View>
+            <View>
+              <Text className="text-sm font-semibold text-slate-400">Pace</Text>
+              <Text className="text-2xl font-bold text-white">{formattedPace} /km</Text>
+            </View>
+          </View>
+
+          <View pointerEvents="none" className="h-72 overflow-hidden rounded-[32px] border border-slate-800 bg-slate-900">
+            {hasPermission && coordinates.length > 0 ? (
+              <MapView 
+                style={{ flex: 1, width: '100%', height: '100%' }}
+                showsUserLocation
+                followsUserLocation
+                pitchEnabled={false}
+                rotateEnabled={false}
+                scrollEnabled={false}
+                zoomEnabled={false}
+                initialRegion={{
+                  latitude: coordinates[0].latitude,
+                  longitude: coordinates[0].longitude,
+                  latitudeDelta: 0.005,
+                  longitudeDelta: 0.005,
+                }}
+              >
+                <Polyline 
+                  coordinates={coordinates} 
+                  strokeColor="#f97316" // Orange 500
+                  strokeWidth={5} 
+                />
+              </MapView>
+            ) : hasPermission ? (
+              <View className="flex-1 items-center justify-center p-6">
+                <Text className="text-center text-slate-400 font-medium tracking-wide">Acquiring GPS Signal...</Text>
+              </View>
+            ) : (
+              <View className="flex-1 items-center justify-center p-6">
+                <Text className="text-center text-slate-500">Enable location permissions to see the map</Text>
+              </View>
+            )}
+          </View>
+
+
 
           <View className="rounded-[32px] border border-slate-800 bg-slate-900 p-6">
             <Text className="mb-4 text-3xl font-bold text-white">Front Camera</Text>
@@ -256,6 +342,7 @@ export default function LiveScreen() {
             <Text className="mt-2 text-xl leading-8 text-white">Stop Conditions: {rearStopText}</Text>
           </View>
         </View>
+        </Pressable>
       </ScrollView>
 
       <VoiceListeningOverlay
@@ -263,6 +350,6 @@ export default function LiveScreen() {
         idleText="Voice control is active. Say TrackStop, or hold anywhere for 3 seconds."
         listeningText="Speech detected. Listening for TrackStop."
       />
-    </Pressable>
+    </View>
   );
 }

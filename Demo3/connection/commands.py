@@ -59,7 +59,10 @@ def forward_command_to_pi(command):
     payload = f"{command}\n\n".encode('utf-8')
     for pi_ip in PI_IPS:
         print(f"[PI CMD] {command} -> {pi_ip}:{PI_CMD_PORT}")
-        g.tx_socket.sendto(payload, (pi_ip, PI_CMD_PORT))
+        try:
+            g.tx_socket.sendto(payload, (pi_ip, PI_CMD_PORT))
+        except OSError as e:
+            print(f"[PI CMD] Failed to reach {pi_ip}: {e}")
 
 # --- NETWORKING THREADS ---
 @g.app.route('/command', methods=['POST'])
@@ -190,4 +193,7 @@ def send_angles_to_pi(angle_front, rear_servo=90):
     payload = f"{body}\n\n".encode('utf-8')
     for pi_ip in PI_IPS:
         print(f"[PI STEER] {body} (front={angle_front:.2f}°, rear_servo={rear_servo}) -> {pi_ip}:{PI_CMD_PORT}")
-        g.tx_socket.sendto(payload, (pi_ip, PI_CMD_PORT))
+        try:
+            g.tx_socket.sendto(payload, (pi_ip, PI_CMD_PORT))
+        except OSError as e:
+            print(f"[PI STEER] Failed to reach {pi_ip}: {e}")

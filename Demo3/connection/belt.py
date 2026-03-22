@@ -148,7 +148,7 @@ def _run_belt_test_loop():
 
 if __name__ == "__main__":
     # Standalone mode: run only belt server + push loop
-    # Does not require starting full laptop_server_new.py
+    # Does not require starting full laptop_server.py
     import threading
 
     threading.Thread(target=run_esp32_status_server, daemon=True).start()

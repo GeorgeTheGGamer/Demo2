@@ -1,5 +1,5 @@
 """Rear camera local test using laptop webcam.
-Mimics the rear-camera path in laptop_server_new.py without Pi streams.
+Mimics the rear-camera path in laptop_server.py without Pi streams.
 Press 'q' to quit.
 """
 
