@@ -183,6 +183,7 @@ def main():
                 with g.state_lock:
                     g.latest_state['front'] = {
                         'robot_status': robot_status,
+                        'turn_state': g.state,
                         'FRONT_ANGLE': f'FRONT_ANGLE={latest_angle_deg}',
                         'object_detection': front_detection_output,
                         'stop_conditions': front_stop_conditions,

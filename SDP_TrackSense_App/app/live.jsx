@@ -14,6 +14,7 @@ const initialStatus = {
   running: false,
   front: {
     robot_status: 'NORMAL',
+    turn_state: 'STRAIGHT',
     ANGLE: 'ANGLE=0.00',
     object_detection: { warning: [], danger: [] },
     stop_conditions: [],
@@ -46,6 +47,7 @@ export default function LiveScreen() {
   const frontStopTimerRef = useRef(null);
   const rearStopTimerRef = useRef(null);
   const pointerTimerRef = useRef(null);
+  const prevTurnStateRef = useRef('STRAIGHT');
 
   const { coordinates, distance, hasPermission } = useLocationTracking(!stopTriggeredRef.current);
   const [startTime] = useState(Date.now());
@@ -71,10 +73,35 @@ export default function LiveScreen() {
   const rearWarningText = useMemo(() => (status.rear.object_detection.warning || []).join(', ') || 'None', [status]);
   const rearDangerText = useMemo(() => (status.rear.object_detection.danger || []).join(', ') || 'None', [status]);
   const rearStopText = useMemo(() => (status.rear.stop_conditions || []).join(', ') || 'None', [status]);
+  const turnState = useMemo(() => status.front.turn_state || 'STRAIGHT', [status]);
 
   useEffect(() => {
     speak('To stop, hold the screen for 3 seconds, or say Track Stop.');
   }, []);
+
+  const announceTurnTimerRef = useRef(null);
+
+  // Announce turning interactions
+  useEffect(() => {
+    if (!connected || turnState === prevTurnStateRef.current) return;
+
+    if (announceTurnTimerRef.current) {
+      clearTimeout(announceTurnTimerRef.current);
+    }
+
+    announceTurnTimerRef.current = setTimeout(() => {
+      prevTurnStateRef.current = turnState;
+      if (turnState === 'LEFT') {
+        speak('Turning left');
+      } else if (turnState === 'RIGHT') {
+        speak('Turning right');
+      } else {
+        speak('Safe'); // STRAIGHT state implies safely centered
+      }
+    }, 2000); // Must hold angle continuously for 2 seconds to trigger speech
+
+    return () => clearTimeout(announceTurnTimerRef.current);
+  }, [turnState, connected, speak]);
 
   // Announce stop condition changes via TTS after 3 s of stability
   useEffect(() => {
@@ -328,7 +355,10 @@ export default function LiveScreen() {
 
           <View className="rounded-[32px] border border-slate-800 bg-slate-900 p-6">
             <Text className="mb-4 text-3xl font-bold text-white">Front Camera</Text>
-            <Text className="text-xl leading-8 text-slate-200">Robot Status: {status.front.robot_status}</Text>
+            <View className="flex-row justify-between">
+              <Text className="text-xl leading-8 text-slate-200">Robot Status: {status.front.robot_status}</Text>
+              <Text className="text-xl font-bold leading-8 text-cyan-400">Heading: {turnState}</Text>
+            </View>
             <Text className="mt-4 text-xl leading-8 text-amber-300">Warnings: {frontWarningText}</Text>
             <Text className="mt-2 text-xl leading-8 text-red-300">Dangers: {frontDangerText}</Text>
             <Text className="mt-2 text-xl leading-8 text-white">Stop Conditions: {frontStopText}</Text>
