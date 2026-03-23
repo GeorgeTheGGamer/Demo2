@@ -1,46 +1,30 @@
-import json
 import socket
 import time
 import Demo3.states.globals as g
 from Demo3.config.configs import *
 
+# UDP Configuration
+PORT = "8888"
+IP = "192.168.118.195"
 
-class _Esp32Client:
-    def __init__(self, conn, addr):
-        self.conn = conn
-        self.addr = addr
-
-
-def _safe_close(conn):
-    try:
-        conn.close()
-    except Exception:
-        pass
-
-
-def _remove_client(client):
-    with g.esp32_clients_lock:
-        if client in g.esp32_clients:
-            g.esp32_clients.remove(client)
-    _safe_close(client.conn)
-    print(f"[ESP32 STATUS] Client removed: {client.addr}")
+# Initialize socket immediately so sending works without "server" start
+udp_server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+udp_server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    udp_server_socket.bind(("0.0.0.0", ESP32_STATUS_PORT))
+    print(f"[ESP32 STATUS] UDP Bound to local port {ESP32_STATUS_PORT}")
+except Exception as e:
+    print(f"[ESP32 STATUS] Warning: Could not bind to specific port: {e}")
 
 
 def run_esp32_status_server():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("0.0.0.0", ESP32_STATUS_PORT))
-    server.listen(5)
-    print(f"[ESP32 STATUS] Listening on 0.0.0.0:{ESP32_STATUS_PORT}")
-
+    """
+    Previously handled client registration.
+    Now just a placeholder to keep the thread alive if started by external logic.
+    """
+    print(f"[ESP32 STATUS] Ready. Sending direct UDP to {IP}:{PORT}")
     while True:
-        conn, addr = server.accept()
-
-        client = _Esp32Client(conn, addr)
-        with g.esp32_clients_lock:
-            g.esp32_clients.append(client)
-
-        print(f"[ESP32 STATUS] Client connected: {addr}")
+        time.sleep(60)
 
 
 def _debounced_rear_status(raw_status: str) -> str:
@@ -64,16 +48,18 @@ def _debounced_rear_status(raw_status: str) -> str:
     right_ok = g.right_out_since is not None and (now - g.right_out_since) >= FOOT_OUT_WARN_DELAY_SEC
 
     if left_ok and right_ok:
-        return "Both out"
+        # If both feet are out, prioritize the latest one
+        if g.left_out_since > g.right_out_since:
+            return "2"
+        else:
+            return "1"
+
     if left_ok:
-        return "Left out"
+        return "2" # 2 for left foot out
     if right_ok:
-        return "Right out"
+        return "1" # 1 for right foot out
 
-    if raw_status in ("Left out", "Right out", "Both out"):
-        return "Inside"
-
-    return raw_status
+    return "0"
 
 
 def push_rear_status_to_esp32():
@@ -82,31 +68,24 @@ def push_rear_status_to_esp32():
         raw_rear_status = rear.get("status", "Inside")
         filtered_rear_status = _debounced_rear_status(raw_rear_status)
 
-        payload = {
-            "rear_status": filtered_rear_status,
-            "lane_status": g.state
-        }
+    # Only send payload if feet are out ("1" or "2").
+    # If "0" (Inside), do not send anything.
+    if filtered_rear_status == "0":
+        return
 
-    data = (json.dumps(payload) + "\n").encode("utf-8")
-    dead = []
-    with g.esp32_clients_lock:
-        clients_snapshot = list(g.esp32_clients)
+    data = (filtered_rear_status + "\n").encode("utf-8")
 
-    for client in clients_snapshot:
-        try:
-            client.conn.sendall(data)
-        except Exception:
-            dead.append(client)
-
-    for client in dead:
-        _remove_client(client)
+    # Send directly to hardcoded IP/PORT
+    try:
+        udp_server_socket.sendto(data, (IP, int(PORT)))
+    except Exception as e:
+        print(f"Failed to send to {IP}:{PORT}: {e}")
 
 def _run_belt_test_loop():
     """
-    Standalone test loop for belt TCP link.
-    - Starts ESP32 status server
+    Standalone test loop for belt UDP link.
     - Periodically updates mock rear status
-    - Pushes payload to connected clients
+    - Pushes payload to target IP
     """
     test_states = [
         "Inside",
@@ -121,24 +100,30 @@ def _run_belt_test_loop():
         "No feet detected",
     ]
 
+    # Expand states to persist long enough for debounce (1.0s)
+    # 0.2s * 10 = 2.0s per state
+    expanded_states = []
+    for s in test_states:
+        expanded_states.extend([s] * 10)
+
     idx = 0
     print("[BELT TEST] Starting standalone test loop. Press Ctrl+C to stop.")
-    print("[BELT TEST] Waiting ESP32 client to connect...")
+    print(f"[BELT TEST] Targeting {IP}:{PORT}...")
 
     try:
         while True:
             # Feed mock rear status so debounced logic can be observed.
+            current_state = expanded_states[idx % len(expanded_states)]
             with g.state_lock:
                 g.latest_state.setdefault("rear", {})
-                g.latest_state["rear"]["status"] = test_states[idx % len(test_states)]
-                g.state = "STRAIGHT"
+                g.latest_state["rear"]["status"] = current_state
 
             # Send to all connected ESP32 clients.
             push_rear_status_to_esp32()
 
             # Optional local debug print
-            raw_status = test_states[idx % len(test_states)]
-            print(f"[BELT TEST] raw rear status = {raw_status}")
+            if idx % 10 == 0:
+                 print(f"[BELT TEST] raw rear status = {current_state}")
 
             idx += 1
             time.sleep(0.2)

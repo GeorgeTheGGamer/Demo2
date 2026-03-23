@@ -19,37 +19,37 @@ def main():
     if len(sys.argv) >= 3:
         port = int(sys.argv[2])
 
-    print(f"[BELT SNIFFER] Connecting to {host}:{port} ...")
-    s = socket.create_connection((host, port), timeout=5)
-    s.settimeout(1.0)
-    print("[BELT SNIFFER] Connected. Waiting for payloads... (Ctrl+C to stop)")
+    print(f"[BELT SNIFFER] Preparing UDP listener targeting {host}:{port} ...")
 
-    buf = b""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("0.0.0.0", 0)) # Bind to ephemeral port
+    s.settimeout(2.0)
+
+    print("[BELT SNIFFER] UDP socket bound. Sending registration packet...")
+
+    # We must send a packet to the server so it registers us as a client
+    try:
+        s.sendto(b"SNIFFER_REGISTER", (host, port))
+        print("[BELT SNIFFER] Registration sent. Waiting for payloads... (Ctrl+C to stop)")
+    except Exception as e:
+        print(f"[BELT SNIFFER] Failed to send registration: {e}")
+        return
+
     try:
         while True:
             try:
-                chunk = s.recv(4096)
+                data, addr = s.recvfrom(4096)
+                line = data.strip()
+                if line:
+                    print(f"[BELT SNIFFER] {line.decode('utf-8', errors='replace')}")
             except socket.timeout:
+                # Periodically re-register / keep-alive
+                s.sendto(b"SNIFFER_REGISTER", (host, port))
                 continue
-
-            if not chunk:
-                print("[BELT SNIFFER] Connection closed by server.")
-                break
-
-            buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                line = line.strip()
-                if not line:
-                    continue
-                print(f"[BELT SNIFFER] {line.decode('utf-8', errors='replace')}")
     except KeyboardInterrupt:
         print("\n[BELT SNIFFER] Stopped by user.")
     finally:
-        try:
-            s.close()
-        except Exception:
-            pass
+        s.close()
         time.sleep(0.05)
 
 

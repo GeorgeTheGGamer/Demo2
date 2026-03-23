@@ -15,7 +15,6 @@ from Demo3.connection.commands import (
     receive_rear_video,
     receive_front_video,
     send_angles_to_pi,
-    forward_command_to_pi,
     broadcast_status,
 )
 from Demo3.connection.belt import run_esp32_status_server, push_rear_status_to_esp32
