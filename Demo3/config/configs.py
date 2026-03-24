@@ -43,8 +43,8 @@ REAR_NO_FEET_HOLD_SEC = 5.0
 FRAME_MAX_AGE_SEC = 6.0
 
 # --- Steering ---
-STEER_VOTE_WINDOW    = 5    # rolling window size (reduced for low-FPS responsiveness)
-STEER_VOTE_THRESHOLD = 3    # minimum votes needed (out of STEER_VOTE_WINDOW)
+STEER_VOTE_WINDOW    = 3    # rolling window size (reduced for low-FPS responsiveness)
+STEER_VOTE_THRESHOLD = 2    # minimum votes needed (out of STEER_VOTE_WINDOW)
 MINMAX_ANGLE = 30.0  # Max heading angle in degrees for servo mapping
 STRAIGHT_THRESHOLD = 5 # angle within ± this value will be ignored
 STEER_THRESHOLD = 10 # angle within ± this value will be ignored
