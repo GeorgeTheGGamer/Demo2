@@ -122,5 +122,10 @@ def reset_steering_to_default():
     current_threshold = STRAIGHT_THRESHOLD
     body = "FRONT_ANGLE=90,REAR_ANGLE=90"
     for pi_ip in PI_IPS:
-        print(f"[PI STEER] RESET -> {body} -> {pi_ip}:{PI_CMD_PORT}")
-        tx_socket.sendto(body.encode('utf-8'), (pi_ip, PI_CMD_PORT))
+        try:
+            print(f"[PI STEER] RESET -> {body} -> {pi_ip}:{PI_CMD_PORT}")
+            tx_socket.sendto(body.encode('utf-8'), (pi_ip, PI_CMD_PORT))
+        except socket.gaierror as e:
+            print(f"[PI STEER] Failed to reach {pi_ip} for RESET: {e}")
+        except Exception as e:
+            print(f"[PI STEER] Error sending RESET to {pi_ip}: {e}")

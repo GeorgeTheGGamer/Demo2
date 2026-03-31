@@ -4,7 +4,7 @@ import { Alert, Pressable, ScrollView, Switch, Text, TouchableOpacity, View } fr
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTTS } from '../hooks/useTTS';
 import { useVoiceCommand } from '../hooks/useVoiceCommand';
-import { LAPTOP_IP, HTTP_BASE } from '../constants';
+import { LAPTOP_IP, HTTP_BASE, resolveActiveIP } from '../constants';
 import { VoiceListeningOverlay } from '../components/VoiceListeningOverlay';
 import { useAuthRequest, makeRedirectUri } from 'expo-auth-session';
 import { STRAVA_CLIENT_ID, STRAVA_SCOPES, discovery, saveAuthTokens, isAuthenticated, clearAuth } from '../services/strava';
@@ -57,6 +57,7 @@ export default function App() {
   }, [stopReason]);
 
   useEffect(() => {
+    resolveActiveIP();
     if (!stopReason) {
       speak('To start, tap the screen, or say Track Go.');
     }

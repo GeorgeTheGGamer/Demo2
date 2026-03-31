@@ -126,16 +126,20 @@ export function generateGPXString(coordinates) {
 
 // Upload the run to Strava using the GPX file
 export async function uploadRunToStrava(coordinates, elapsedTimeMs, distanceMeters) {
+  console.log('[Strava] Starting upload. Coords:', coordinates.length, 'points');
   const token = await getValidAccessToken();
+  console.log('[Strava] Token obtained:', token ? token.substring(0, 10) + '...' : 'NULL');
   if (!token) throw new Error("Not authenticated to Strava");
   if (!coordinates || coordinates.length === 0) throw new Error("No GPS coordinates to upload");
 
   const gpxString = generateGPXString(coordinates);
+  console.log('[Strava] GPX generated, length:', gpxString.length);
   
   // Prepare robust file approach using expo-file-system
   const FileSystem = require('expo-file-system/legacy');
   const fileUri = FileSystem.documentDirectory + 'run.gpx';
   await FileSystem.writeAsStringAsync(fileUri, gpxString, { encoding: 'utf8' });
+  console.log('[Strava] GPX file written to:', fileUri);
 
   // Prepare multipart form data
   const formData = new FormData();
@@ -143,12 +147,12 @@ export async function uploadRunToStrava(coordinates, elapsedTimeMs, distanceMete
   formData.append('activity_type', 'run');
   formData.append('name', 'TrackSense Run');
   formData.append('description', 'Recorded with TrackSense App.');
-  formData.append('visibility', 'only_me');
   formData.append('file', {
     uri: fileUri,
     name: 'run.gpx',
     type: 'application/gpx+xml'
   });
+  console.log('[Strava] FormData prepared. Sending POST to Strava uploads API...');
 
   try {
     const response = await fetch('https://www.strava.com/api/v3/uploads', {
@@ -159,15 +163,17 @@ export async function uploadRunToStrava(coordinates, elapsedTimeMs, distanceMete
       body: formData,
     });
     
+    console.log('[Strava] Response status:', response.status, response.statusText);
+    const responseBody = await response.text();
+    console.log('[Strava] Response body:', responseBody);
+
     if (!response.ok) {
-      const err = await response.text();
-      console.error("Strava Upload Error:", err);
-      throw new Error("Failed to upload to Strava.");
+      throw new Error(`Strava API rejected upload (${response.status}): ${responseBody}`);
     }
     
-    return await response.json();
+    return JSON.parse(responseBody);
   } catch (err) {
-    console.error(err);
+    console.error('[Strava] Upload threw an exception:', err);
     throw err;
   }
 }

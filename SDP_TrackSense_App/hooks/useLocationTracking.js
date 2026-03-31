@@ -50,17 +50,14 @@ export function useLocationTracking(isActive) {
       try {
         const sub = await Location.watchPositionAsync(
           {
-            accuracy: Location.Accuracy.High,
-            timeInterval: 2000,
-            distanceInterval: 5, // minimum 5 meters to record new point
+            accuracy: Location.Accuracy.BestForNavigation,
+            timeInterval: 1000,
+            distanceInterval: 1, // record every 1 meter of movement
           },
           (location) => {
             const { latitude, longitude, altitude, accuracy } = location.coords;
 
-            // Ignore highly inaccurate GPS pings (radius > 20 meters)
-            if (accuracy != null && accuracy > 20) {
-              return;
-            }
+            // Accept all GPS pings regardless of accuracy
 
             const newPoint = {
               latitude,
@@ -79,10 +76,7 @@ export function useLocationTracking(isActive) {
                   newPoint.longitude
                 );
 
-                // Ignore micro-movements under 5 meters to prevent stationary GPS jitter
-                if (dist < 5) {
-                  return prev;
-                }
+                // No minimum distance filter — record every movement
 
                 // Update total distance immediately
                 setDistance((d) => d + dist);

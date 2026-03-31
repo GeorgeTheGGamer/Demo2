@@ -33,7 +33,7 @@ export default function LiveScreen() {
   const [isHoldStopping, setIsHoldStopping] = useState(false);
   const [autoStopWarning, setAutoStopWarning] = useState(null);
   const wsRef = useRef(null);
-  const { speak } = useTTS();
+  const { speak, speakWithInterrupt } = useTTS();
   const { isListening, isSpeechDetected } = useVoiceCommand({
     alwaysListening: true,
     announceOnStart: false,
@@ -48,6 +48,10 @@ export default function LiveScreen() {
   const rearStopTimerRef = useRef(null);
   const pointerTimerRef = useRef(null);
   const prevTurnStateRef = useRef('STRAIGHT');
+  const lastFrontTtsTextRef = useRef('');
+  const lastFrontTtsTimeRef = useRef(0);
+  const lastRearTtsTextRef = useRef('');
+  const lastRearTtsTimeRef = useRef(0);
 
   const { coordinates, distance, hasPermission } = useLocationTracking(!stopTriggeredRef.current);
   const [startTime] = useState(Date.now());
@@ -92,11 +96,11 @@ export default function LiveScreen() {
     announceTurnTimerRef.current = setTimeout(() => {
       prevTurnStateRef.current = turnState;
       if (turnState === 'LEFT') {
-        speak('Turning left');
+        speakWithInterrupt('Turning left', 1000);
       } else if (turnState === 'RIGHT') {
-        speak('Turning right');
+        speakWithInterrupt('Turning right', 1000);
       } else {
-        speak('Safe'); // STRAIGHT state implies safely centered
+        speakWithInterrupt('Safe', 1000); // STRAIGHT state implies safely centered
       }
     }, 2000); // Must hold angle continuously for 2 seconds to trigger speech
 
@@ -112,7 +116,20 @@ export default function LiveScreen() {
       frontStopTimerRef.current = setTimeout(() => {
         // Only speak if the condition is still the same after 3 s
         if (prevFrontStopRef.current === frontStopText) {
-          speak(`Front: ${frontStopText}`);
+          const now = Date.now();
+          const isSameText = frontStopText === lastFrontTtsTextRef.current;
+          const isFlicker = isSameText && (now - lastFrontTtsTimeRef.current < 15000);
+
+          if (!isFlicker) {
+            lastFrontTtsTextRef.current = frontStopText;
+            lastFrontTtsTimeRef.current = now;
+
+            if (frontStopText.includes('Obstacle in Lane')) {
+              speakWithInterrupt('Obstacle in Lane', 2000);
+            } else {
+              speakWithInterrupt(`Front: ${frontStopText}`, 2000);
+            }
+          }
         }
       }, 3000);
     }
@@ -125,7 +142,15 @@ export default function LiveScreen() {
     if (rearStopText !== 'None') {
       rearStopTimerRef.current = setTimeout(() => {
         if (prevRearStopRef.current === rearStopText) {
-          speak(`Rear: ${rearStopText}`);
+          const now = Date.now();
+          const isSameText = rearStopText === lastRearTtsTextRef.current;
+          const isFlicker = isSameText && (now - lastRearTtsTimeRef.current < 15000);
+
+          if (!isFlicker) {
+            lastRearTtsTextRef.current = rearStopText;
+            lastRearTtsTimeRef.current = now;
+            speakWithInterrupt(`Rear: ${rearStopText}`, 2000);
+          }
         }
       }, 3000);
     }
@@ -205,9 +230,11 @@ export default function LiveScreen() {
       const isStrava = await isAuthenticated();
       if (isStrava && coordinates.length > 0 && saveToStrava !== 'false') {
         await uploadRunToStrava(coordinates, elapsedMs, distance);
+        Alert.alert('Strava Success', 'Your run was successfully uploaded to Strava!');
       }
     } catch (err) {
       console.error('Strava upload failed', err);
+      Alert.alert('Strava Error', 'Upload failed: ' + err.message);
     }
 
     try {
@@ -353,23 +380,23 @@ export default function LiveScreen() {
 
 
 
-          <View className="rounded-[32px] border border-slate-800 bg-slate-900 p-6">
+          <View className="rounded-[32px] border border-slate-800 bg-slate-900 p-6 overflow-hidden">
             <Text className="mb-4 text-3xl font-bold text-white">Front Camera</Text>
-            <View className="flex-row justify-between">
-              <Text className="text-xl leading-8 text-slate-200">Robot Status: {status.front.robot_status}</Text>
-              <Text className="text-xl font-bold leading-8 text-cyan-400">Heading: {turnState}</Text>
+            <View className="flex-row justify-between flex-wrap gap-2">
+              <Text className="text-xl leading-8 text-slate-200 flex-shrink">Robot Status: {status.front.robot_status}</Text>
+              <Text className="text-xl font-bold leading-8 text-cyan-400 flex-shrink">Heading: {turnState}</Text>
             </View>
-            <Text className="mt-4 text-xl leading-8 text-amber-300">Warnings: {frontWarningText}</Text>
-            <Text className="mt-2 text-xl leading-8 text-red-300">Dangers: {frontDangerText}</Text>
-            <Text className="mt-2 text-xl leading-8 text-white">Stop Conditions: {frontStopText}</Text>
+            <Text className="mt-4 text-xl leading-8 text-amber-300 flex-wrap">Warnings: {frontWarningText}</Text>
+            <Text className="mt-2 text-xl leading-8 text-red-300 flex-wrap">Dangers: {frontDangerText}</Text>
+            <Text className="mt-2 text-xl leading-8 text-white flex-wrap">Stop Conditions: {frontStopText}</Text>
           </View>
 
-          <View className="rounded-[32px] border border-slate-800 bg-slate-900 p-6">
+          <View className="rounded-[32px] border border-slate-800 bg-slate-900 p-6 overflow-hidden">
             <Text className="mb-4 text-3xl font-bold text-white">Rear Camera</Text>
-            <Text className="text-xl leading-8 text-slate-200">Foot Status: {status.rear.status}</Text>
-            <Text className="mt-4 text-xl leading-8 text-amber-300">Warnings: {rearWarningText}</Text>
-            <Text className="mt-2 text-xl leading-8 text-red-300">Dangers: {rearDangerText}</Text>
-            <Text className="mt-2 text-xl leading-8 text-white">Stop Conditions: {rearStopText}</Text>
+            <Text className="text-xl leading-8 text-slate-200 flex-wrap">Foot Status: {status.rear.status}</Text>
+            <Text className="mt-4 text-xl leading-8 text-amber-300 flex-wrap">Warnings: {rearWarningText}</Text>
+            <Text className="mt-2 text-xl leading-8 text-red-300 flex-wrap">Dangers: {rearDangerText}</Text>
+            <Text className="mt-2 text-xl leading-8 text-white flex-wrap">Stop Conditions: {rearStopText}</Text>
           </View>
         </View>
         </Pressable>

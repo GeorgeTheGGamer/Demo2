@@ -146,7 +146,8 @@ class SteeringHelper:
             return 0.0
 
         # New logic: use the center bottom point and the top point to calculate the heading angle.
-        horizon_idx = max(0, len(self.center_points) - 5)
+        # horizon_idx = max(0, len(self.center_points) - 10)
+        horizon_idx = max(0, len(self.center_points) - 1)
         x1, y1 = self.center_points[horizon_idx]  # near-horizon point (safe regardless of n_samples)
         x2, y2 = self.frame_width/2, self.frame_height # bottom point (representing car position)
 
@@ -165,9 +166,9 @@ class SteeringHelper:
 
         # Priority: 1. angle heading to center of lane 2. keep car go in correct direction 3. 0
         if abs(theta_deg) >= g.current_threshold:
-            return theta_deg
+            return -theta_deg
         elif abs(theta2_deg) >= g.current_threshold:
-            return theta2_deg
+            return -theta2_deg
         else:
             return 0.0
 
@@ -204,7 +205,7 @@ def rear_angle_to_servo(angle_deg: float) -> int:
     90 = centred
     """
     clamped = max(min(angle_deg, 45.0), -45.0)
-    raw = 90.0 + clamped
+    raw = 90.0 - clamped
     snapped = round(float(raw) / 5.0) * 5
     return max(45, min(135, snapped))
 

@@ -166,7 +166,11 @@ def send_angles_to_pi(angle_front, rear_servo=90):
         forward_command_to_pi('START')
         g.pi_started = True
 
-    front_servo = angle_deg_to_servo_held(angle_front)
+    # front_servo = angle_deg_to_servo_held(angle_front)
+    if abs(angle_front) > g.current_threshold: 
+        front_servo = angle_front   
+    else:
+        front_servo = 0
     if front_servo is not None:
         # update current_angle for servo
         g.front_current_angle = g.front_current_angle + front_servo
@@ -178,7 +182,7 @@ def send_angles_to_pi(angle_front, rear_servo=90):
 
         if abs(g.front_current_angle - 90) > STATE_THRESHOLD:
             g.state = 'LEFT' if g.front_current_angle < 90 else 'RIGHT'
-        if abs(g.front_current_angle - 90) <= STRAIGHT_THRESHOLD:
+        if abs(g.front_current_angle - 90) <= STATE_THRESHOLD:
             g.state = 'STRAIGHT'
 
     g.rear_current_angle = float(rear_servo)  # absolute servo position, independent of front

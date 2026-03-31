@@ -82,7 +82,7 @@ def main():
 
     # Hold-time thresholds — defined once, never change at runtime
     FRONT_HOLD = {
-        'If object is in lane':     HOLD_OBJECT_IN_LANE_SEC,
+        'Obstacle in Lane':     HOLD_OBJECT_IN_LANE_SEC,
         'Corner Angle too extreme': HOLD_CORNER_ANGLE_SEC,
         'No lane Detected':         HOLD_FRONT_NO_LANE_SEC,
         'Robot out of lane':        HOLD_FRONT_OUT_LANE_SEC,
@@ -160,7 +160,7 @@ def main():
                     close_ratio=0.6,
                 )
                 if len(front_detection_output['danger']) > 0:
-                    front_stop_conditions.append('If object is in lane')
+                    front_stop_conditions.append('Obstacle in Lane')
                 if len(lanes_xy_front) == 0:
                     front_stop_conditions.append('No lane Detected')
                     front_stop_conditions.append('Robot out of lane')
